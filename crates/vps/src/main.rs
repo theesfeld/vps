@@ -387,6 +387,16 @@ fn session_row(cfg: &Config, s: &SessionInfo, selected: bool) -> Element<'static
     let state = if s.attached { "live" } else { "idle" };
     let cmd = if s.command.is_empty() {
         "bash".into()
+    } else if !s.title.is_empty() {
+        let base = s
+            .command
+            .split_whitespace()
+            .next()
+            .unwrap_or("grok")
+            .rsplit('/')
+            .next()
+            .unwrap_or("grok");
+        truncate(&format!("{base} [{}]", s.title), 56)
     } else {
         truncate(&s.command, 48)
     };

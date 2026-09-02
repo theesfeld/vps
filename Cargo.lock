@@ -3547,6 +3547,7 @@ dependencies = [
  "libc",
  "nix",
  "serde",
+ "serde_json",
  "toml",
  "vps-protocol",
 ]
