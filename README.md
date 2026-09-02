@@ -4,10 +4,10 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Listen](https://img.shields.io/badge/listen-unix%20socket%20only-success)](#threat-model)
 
-A **native Wayland window** on the laptop, a **real POSIX PTY** on grok, and **nothing listening on the network**. Super+Shift+Return should feel like Super+Return — except the shell is over there.
+A **native Wayland picker** on the laptop, a **real POSIX PTY** on grok, and **nothing listening on the network**. Super+Shift+Return should feel like Super+Return — except the shell is over there, in **your** terminal.
 
 ```
-Super+Shift+Return  →  vps  →  ssh -tt grok vpsd attach  →  /dev/pts/N
+Super+Shift+Return  →  vps  →  $terminal ssh -tt grok vpsd attach  →  /dev/pts/N
 ```
 
 ---
@@ -35,7 +35,7 @@ Super+Shift+Return  →  vps  →  ssh -tt grok vpsd attach  →  /dev/pts/N
 | ssh-obi | SSH-stdio + Unix socket, early crate, not a native window |
 | mosh | One UDP PTY; **must** bind 60000–61000 |
 | zellij / tmux | Nested UI, not an OS window |
-| `kitty -e mosh` | Scripts around someone else's emulator |
+| iced_term as the session window | Rust widget; dies on Grok’s alt-screen flood |
 
 None of those is: niri `app-id=vps`, red ground, Super+Shift+Return, PTY owned on grok, **no TCP/UDP bind**.
 
@@ -48,7 +48,8 @@ Mosh is the wrong *tunnel for a mux*. It **is** a PTY, and it has to listen on U
 ```mermaid
 sequenceDiagram
     participant Key as Super+Shift+Return
-    participant GUI as vps (Wayland)
+    participant GUI as vps (picker)
+    participant Term as your terminal
     participant SSH as ssh -tt grok
     participant Attach as vpsd attach
     participant Sock as $XDG_RUNTIME_DIR/vpsd.sock
@@ -56,25 +57,27 @@ sequenceDiagram
     participant PTY as /dev/pts/N
 
     Key->>GUI: spawn
-    GUI->>SSH: child process
+    GUI->>Term: first-run chooser, then attach
+    Term->>SSH: child process
     SSH->>Attach: remote command
     Attach->>Sock: JSON Open {cols,rows}
     Sock->>D: accept (mode 0600)
     D->>PTY: reuse idle or posix_openpt
     D-->>Attach: JSON Hello {v,id}
     Note over Attach,PTY: raw bytes both ways
-    GUI--xAttach: window closed
+    Term--xAttach: window closed
     Attach--xD: splice EOF
     D->>PTY: detach (shell keeps running)
     Key->>GUI: spawn again
     D->>PTY: same id, same shell
 ```
 
-1. **`vps`** is an iced window (`iced_term` + `alacritty_terminal`). It is a real terminal emulator, not kitty wrapping a script. App id `vps`. Palette is Irongall with the ground shifted red.
-2. Its child is **OpenSSH**: `ssh -tt grok '/home/tj/.local/bin/vpsd attach'`. `-tt` forces a remote tty. ControlMaster on `Host grok` makes the extra hop cheap.
-3. **`vpsd attach`** requires a tty. It connects to the **Unix socket** the daemon bound (never a port).
-4. **`vpsd daemon`** (systemd `--user` on grok) owns the PTY table and a **scrollback ring** of PTY output (`scrollback_bytes`). `open` creates a PTY; `attach --id` reconnects.
-5. Closing the window ends the SSH splice. The daemon **detaches**; the shell keeps running. Shell reattach **replays** stored output. **Grok** does not get a homemade screen dump (that crashed iced). After the splice is live we bump the pty size so Grok full-paints the current UI.
+1. **`vps`** is an iced **picker** (and settings / first-run terminal chooser). App id `vps`. Palette is Irongall with the ground shifted red. It is not the TTY — iced_term died on Grok’s alt-screen flood.
+2. The session window is **your terminal** (`[terminal].program`). Empty → chooser of known binaries on PATH (kitty, foot, alacritty, ghostty, wezterm). Recipes use each emulator’s documented CLI for class/app-id (and colors where the docs name the flag). Switch later with picker `t` or `vps settings`.
+3. That window’s child is **OpenSSH**: `ssh -tt grok '/home/tj/.local/bin/vpsd attach'`. `-tt` forces a remote tty. ControlMaster on `Host grok` makes the extra hop cheap.
+4. **`vpsd attach`** requires a tty. It connects to the **Unix socket** the daemon bound (never a port).
+5. **`vpsd daemon`** (systemd `--user` on grok) owns the PTY table and a **scrollback ring** of PTY output (`scrollback_bytes`). `open` creates a PTY; `attach --id` reconnects.
+6. Closing the terminal ends the SSH splice. The daemon **detaches**; the shell keeps running. Shell reattach **replays** stored output. **Grok** is not dumped as a homemade screen (that crashed iced). After the splice is live we bump the pty size so Grok full-paints the current UI.
 
 `SSH_CONNECTION` is stripped from the login shell so `~/.bashrc.d/zellij.sh` does not `exec zellij` on these PTYs.
 
@@ -129,16 +132,17 @@ Replace a running binary: `systemctl --user stop vpsd` first (ETXTBSY otherwise)
 
 | You do | What happens on grok |
 | --- | --- |
-| Super+Shift+Return | `vps` lists PTYs over SSH (`vpsd list`). If any exist, a picker. If none, a new PTY. |
-| Close the window | SSH splice ends. **The PTY stays.** `grok` / builds / vim keep running. |
+| Super+Shift+Return | `vps` lists PTYs over SSH (`vpsd list`). If any exist, a picker. If none (and a terminal is chosen), a new PTY. First run: choose a terminal. |
+| Close the terminal | SSH splice ends. **The PTY stays.** `grok` / builds / vim keep running. |
 | Close the laptop | Same as close: SSH dies, daemon detaches, PTY stays. |
 | Super+Shift+Return again | Picker: **idle** sessions you can reconnect, **live** ones already in another window, **+ new session**. |
-| Enter on an idle row | `vpsd attach --id N` — shell: replayed `ls`; Grok/vim: redraw, not logo replay |
+| Enter on an idle row | opens your terminal with `vpsd attach --id N` — shell: replayed `ls`; Grok/vim: redraw, not logo replay |
 | `n` or **+ new session** | `vpsd attach --new` |
 | Enter on a **live** row | takes over that PTY (other window, if any, detaches) |
+| `t` | choose a different terminal (writes `~/.config/vps/config.toml`) |
 | `ssh grok` | unchanged: zellij `grok-build` |
 
-Picker keys: `↑↓` / `j k`, `enter`, `n` new, `s` settings, `esc` quit.
+Picker keys: `↑↓` / `j k`, `enter`, `n` new, `t` terminal, `s` settings, `esc` quit.
 
 ### Settings
 
@@ -182,6 +186,8 @@ Shipped copies are **the defaults**, commented. Every modifiable knob is a key. 
 | `[ssh]` | `list` | `"/home/tj/.local/bin/vpsd list"` | JSON session list, no tty |
 | `[ssh]` | `list_args` | `["-T"]` | ssh argv for the list hop |
 | `[picker]` | `mode` | `"when_sessions"` | `when_sessions` / `always` / `never` |
+| `[terminal]` | `program` | `""` | Session emulator. Empty → first-run chooser. Basename or path. |
+| `[terminal]` | `args` | `[]` | Extra argv after the emulator’s flags, before `ssh` |
 | `[window]` | `width` / `height` | `1280.0` / `800.0` | Initial size (pixels) |
 | `[window]` | `app_id` | `"vps"` | Wayland app id |
 | `[font]` | `family` | `""` | fontconfig family; empty = `monospace` (kitty's default; Berkeley Mono here) |
@@ -194,7 +200,9 @@ Shipped copies are **the defaults**, commented. Every modifiable knob is a key. 
 | `[colors]` | `foreground`, `black`…`white`, `bright_*`, `dim_*` | (see file) | Full 16-colour + dim set |
 | `[colors]` | `bright_foreground` | unset | Optional override |
 
-iced does not talk to fontconfig. `vps` runs `fc-match` (the same database kitty uses), reads the TTF/OTF files, and registers them with iced. Empty `family` is fontconfig `monospace`.
+iced does not talk to fontconfig. The **picker** runs `fc-match` (the same database kitty uses), reads the TTF/OTF files, and registers them with iced. Empty `family` is fontconfig `monospace`. The session window uses the chosen emulator’s own font settings, plus documented CLI overrides when we have them (kitty `-o font_family`, foot `--font`, ghostty `--font-family`).
+
+`[terminal].program` empty means “ask”. Known names get a recipe (class/app-id, and colors for kitty/foot/ghostty). Anything else is `{program} {args…} ssh …` — put `-e` in `args` if that emulator needs it.
 
 `ssh.remote` must stay a **single** string. OpenSSH concatenates extra argv with spaces and passes the result to `$SHELL -c`. Splitting `vpsd` and `attach` makes bash treat `attach` as a leftover argument; you get `vpsd` help and the window dies.
 
@@ -236,7 +244,7 @@ After `hello`, both sides splice 8-bit data. Client EOF → daemon **detaches** 
 | --- | --- |
 | `vps-protocol` | JSON messages + listen-address policy |
 | `vpsd` | Daemon + `attach` broker |
-| `vps` | iced GUI |
+| `vps` | iced picker / settings / terminal chooser |
 
 ---
 

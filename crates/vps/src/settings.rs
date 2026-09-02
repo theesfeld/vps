@@ -13,6 +13,8 @@ pub struct Form {
     pub remote: String,
     pub list_args: String,
     pub list: String,
+    pub terminal_program: String,
+    pub terminal_args: String,
     pub picker_mode: String,
     pub width: String,
     pub height: String,
@@ -34,6 +36,8 @@ pub enum Msg {
     Remote(String),
     ListArgs(String),
     List(String),
+    TerminalProgram(String),
+    TerminalArgs(String),
     Picker(String),
     Width(String),
     Height(String),
@@ -59,6 +63,8 @@ impl Form {
             remote: cfg.ssh.remote.clone(),
             list_args: cfg.ssh.list_args.join(" "),
             list: cfg.ssh.list.clone(),
+            terminal_program: cfg.terminal.program.clone(),
+            terminal_args: cfg.terminal.args.join(" "),
             picker_mode: cfg.picker.mode.clone(),
             width: fmt_num(cfg.window.width),
             height: fmt_num(cfg.window.height),
@@ -84,6 +90,8 @@ impl Form {
         cfg.ssh.remote = self.remote.trim().to_string();
         cfg.ssh.list_args = split_ws(&self.list_args);
         cfg.ssh.list = self.list.trim().to_string();
+        cfg.terminal.program = self.terminal_program.trim().to_string();
+        cfg.terminal.args = split_ws(&self.terminal_args);
         cfg.picker.mode = self.picker_mode.clone();
         if !PICKER_MODES.contains(&cfg.picker.mode.as_str()) {
             return Err("picker.mode must be when_sessions, always, or never".into());
@@ -113,6 +121,8 @@ impl Form {
             Msg::Remote(s) => self.remote = s,
             Msg::ListArgs(s) => self.list_args = s,
             Msg::List(s) => self.list = s,
+            Msg::TerminalProgram(s) => self.terminal_program = s,
+            Msg::TerminalArgs(s) => self.terminal_args = s,
             Msg::Picker(s) => self.picker_mode = s,
             Msg::Width(s) => self.width = s,
             Msg::Height(s) => self.height = s,
@@ -182,7 +192,8 @@ fn set_color(c: &mut Colors, name: &str, s: String) {
 }
 
 pub fn view<'a>(cfg: &'a Config, form: &'a Form) -> Element<'a, Msg> {
-    let mut col = column![
+    let mut col =
+        column![
         text("settings").size(22).color(fg(cfg)),
         text("writes ~/.config/vps/config.toml · font family needs a restart")
             .size(13)
@@ -194,6 +205,13 @@ pub fn view<'a>(cfg: &'a Config, form: &'a Form) -> Element<'a, Msg> {
         field("remote", &form.remote, Msg::Remote),
         field("list_args", &form.list_args, Msg::ListArgs),
         field("list", &form.list, Msg::List),
+        heading(cfg, "terminal"),
+        field(
+            "program (empty = chooser next start; kitty/foot/alacritty/ghostty/wezterm or a path)",
+            &form.terminal_program,
+            Msg::TerminalProgram,
+        ),
+        field("args (extra argv before ssh)", &form.terminal_args, Msg::TerminalArgs),
         heading(cfg, "picker"),
         field(
             "mode (when_sessions | always | never)",
@@ -218,7 +236,7 @@ pub fn view<'a>(cfg: &'a Config, form: &'a Form) -> Element<'a, Msg> {
         field("COLORTERM", &form.colorterm, Msg::Colorterm),
         heading(cfg, "colors"),
     ]
-    .spacing(8);
+        .spacing(8);
 
     for (name, value) in color_fields(&form.colors) {
         col = col.push(field(name, value, move |s| Msg::Color(name, s)));

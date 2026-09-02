@@ -192,7 +192,10 @@ impl Hub {
 }
 
 fn grok_title(cwd: &str, command: &str) -> String {
-    if !command.split_whitespace().any(|w| w.ends_with("grok") || w == "grok") {
+    if !command
+        .split_whitespace()
+        .any(|w| w.ends_with("grok") || w == "grok")
+    {
         return String::new();
     }
     if cwd.is_empty() {
