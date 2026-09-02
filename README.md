@@ -74,7 +74,7 @@ sequenceDiagram
 2. Its child is **OpenSSH**: `ssh -tt grok '/home/tj/.local/bin/vpsd attach'`. `-tt` forces a remote tty. ControlMaster on `Host grok` makes the extra hop cheap.
 3. **`vpsd attach`** requires a tty. It connects to the **Unix socket** the daemon bound (never a port).
 4. **`vpsd daemon`** (systemd `--user` on grok) owns the PTY table and a **scrollback ring** of PTY output (`scrollback_bytes`). `open` creates a PTY; `attach --id` reconnects.
-5. Closing the window ends the SSH splice. The daemon **detaches**; the shell keeps running. Shell reattach **replays** stored output. **TUI apps (Grok)** restore the **current screen grid** (not the logo animation stream), then a one-row size bump so Grok full-paints instead of dirty-region diffs on a blank terminal.
+5. Closing the window ends the SSH splice. The daemon **detaches**; the shell keeps running. Shell reattach **replays** stored output. **Grok** does not get a homemade screen dump (that crashed iced). After the splice is live we bump the pty size so Grok full-paints the current UI.
 
 `SSH_CONNECTION` is stripped from the login shell so `~/.bashrc.d/zellij.sh` does not `exec zellij` on these PTYs.
 

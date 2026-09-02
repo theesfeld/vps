@@ -74,11 +74,11 @@ impl Hub {
             .map_err(std::io::Error::other)
     }
 
-    /// Grok / vim: dump the live grid (not the logo animation stream).
-    /// Shell: replay captured `ls` output.
+    /// Shell: replay captured `ls`. TUI (Grok): empty — dump crashed iced;
+    /// live splice + a size-change redraw paints the current frame instead.
     pub fn replay_on_attach(&self, id: u64) -> Vec<u8> {
         match self.slots.get(&id) {
-            Some(s) if s.tui => s.screen.dump_ansi(),
+            Some(s) if s.tui => Vec::new(),
             Some(s) => s.scrollback.iter().copied().collect(),
             None => Vec::new(),
         }
@@ -86,25 +86,6 @@ impl Hub {
 
     pub fn is_tui(&self, id: u64) -> bool {
         self.slots.get(&id).map(|s| s.tui).unwrap_or(false)
-    }
-
-    pub fn force_redraw(&self, id: u64, cols: u16, rows: u16) {
-        let alt = if rows > 2 {
-            rows - 1
-        } else {
-            rows.saturating_add(1)
-        };
-        if let Some(slot) = self.slots.get(&id) {
-            let fd = slot.session.master.as_raw_fd();
-            let _ = pty::set_winsize(fd, &pty::winsize(cols, alt));
-        }
-        self.winch(id);
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        if let Some(slot) = self.slots.get(&id) {
-            let fd = slot.session.master.as_raw_fd();
-            let _ = pty::set_winsize(fd, &pty::winsize(cols, rows));
-        }
-        self.winch(id);
     }
 
     pub fn push_output(&mut self, id: u64, bytes: &[u8]) {
@@ -137,11 +118,19 @@ impl Hub {
     }
 
     pub fn winch(&self, id: u64) {
+        let Some(slot) = self.slots.get(&id) else {
+            return;
+        };
+        let bash = slot.session.child.id();
+        let _ = kill(Pid::from_raw(bash as i32), Signal::SIGWINCH);
+        for child in children_of(bash) {
+            let _ = kill(Pid::from_raw(child as i32), Signal::SIGWINCH);
+        }
+    }
+
+    pub fn set_size(&self, id: u64, cols: u16, rows: u16) {
         if let Some(slot) = self.slots.get(&id) {
-            let pid = slot.session.child.id() as i32;
-            let _ = kill(Pid::from_raw(pid), Signal::SIGWINCH);
-            // Grok is a child of bash; the session leader's group gets the winch.
-            let _ = kill(Pid::from_raw(-pid), Signal::SIGWINCH);
+            let _ = pty::set_winsize(slot.session.master.as_raw_fd(), &pty::winsize(cols, rows));
         }
     }
 
@@ -222,6 +211,22 @@ fn cmdline(pid: u32) -> String {
         .map(|p| String::from_utf8_lossy(p).into_owned())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn children_of(pid: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for ent in dir.flatten() {
+        let Ok(child) = ent.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if proc_ppid(child) == Some(pid) {
+            out.push(child);
+        }
+    }
+    out
 }
 
 fn first_non_shell_child(pid: u32) -> Option<u32> {

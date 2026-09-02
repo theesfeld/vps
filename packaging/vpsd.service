@@ -7,6 +7,9 @@ Type=simple
 ExecStart=%h/.local/bin/vpsd daemon
 Restart=on-failure
 RestartSec=2
+# Only the daemon process. PTY shells (Grok) must survive `systemctl stop`.
+KillMode=process
+TimeoutStopSec=5
 
 [Install]
 WantedBy=default.target

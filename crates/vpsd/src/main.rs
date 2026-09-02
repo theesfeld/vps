@@ -216,13 +216,26 @@ fn splice_session(
             .map_err(|e| std::io::Error::other(e.to_string()))?
             .is_tui(id);
         if tui {
-            hub.lock()
-                .map_err(|e| std::io::Error::other(e.to_string()))?
-                .force_redraw(id, cols, rows);
-        } else {
-            hub.lock()
-                .map_err(|e| std::io::Error::other(e.to_string()))?
-                .winch(id);
+            let hub_r = hub.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                let alt = if rows > 2 {
+                    rows - 1
+                } else {
+                    rows.saturating_add(1)
+                };
+                if let Ok(h) = hub_r.lock() {
+                    h.set_size(id, cols, alt);
+                    h.winch(id);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                if let Ok(h) = hub_r.lock() {
+                    h.set_size(id, cols, rows);
+                    h.winch(id);
+                }
+            });
+        } else if let Ok(h) = hub.lock() {
+            h.winch(id);
         }
         splice_fds(
             stream.as_raw_fd(),
