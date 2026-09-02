@@ -4,7 +4,6 @@
 //! tty does not. Flags below are from each emulator's current official CLI.
 
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -122,39 +121,42 @@ pub fn spawn_session(cfg: &Config, spec: AttachSpec) -> Result<(), String> {
     let program = resolve_program(cfg.terminal.program.trim())?;
     let mut cfg = cfg.clone();
     cfg.terminal.program = program;
-    let argv = attach_argv(&cfg, spec)?;
+    let inner = attach_argv(&cfg, spec)?;
+    let argv = systemd_run_argv(&inner, &cfg);
     let (bin, args) = argv
         .split_first()
         .ok_or_else(|| "empty terminal argv".to_string())?;
-    let mut cmd = Command::new(bin);
-    cmd.args(args)
+    let status = Command::new(bin)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .process_group(0);
-    for (k, v) in cfg.term_env() {
-        cmd.env(k, v);
+        .status()
+        .map_err(|e| format!("{bin}: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{bin} failed ({status})"))
     }
-    let mut child = cmd.spawn().map_err(|e| format!("{bin}: {e}"))?;
-    // kitty --detach: the process we spawned is a launcher that exits once
-    // the OS window exists. Closing the iced picker before that exits kills
-    // kitty (window opens, then dies). Other emulators stay as the child.
-    if basename(bin) == "kitty" {
-        wait_detached_launcher(&mut child)?;
-    }
-    Ok(())
 }
 
-fn wait_detached_launcher(child: &mut std::process::Child) -> Result<(), String> {
-    for _ in 0..50 {
-        match child.try_wait() {
-            Ok(Some(st)) if st.success() => return Ok(()),
-            Ok(Some(st)) => return Err(format!("terminal launcher exited {st}")),
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(40)),
-            Err(e) => return Err(format!("wait launcher: {e}")),
-        }
+/// niri `spawn` runs vps in `app-niri-vps-*.scope`. When the picker exits,
+/// systemd kills that cgroup. Start the TTY as a separate user service so it
+/// survives. `systemd-run --user --no-block --collect` (see systemd-run(1)).
+pub fn systemd_run_argv(inner: &[String], cfg: &Config) -> Vec<String> {
+    let mut a = vec![
+        "systemd-run".into(),
+        "--user".into(),
+        "--no-block".into(),
+        "--collect".into(),
+        "--quiet".into(),
+    ];
+    for (k, v) in cfg.term_env() {
+        a.push(format!("--setenv={k}={v}"));
     }
-    Ok(())
+    a.push("--".into());
+    a.extend(inner.iter().cloned());
+    a
 }
 
 fn ssh_cmd(cfg: &Config, spec: AttachSpec) -> Vec<String> {
@@ -164,11 +166,7 @@ fn ssh_cmd(cfg: &Config, spec: AttachSpec) -> Vec<String> {
 }
 
 fn kitty_flags(cfg: &Config) -> Vec<String> {
-    let mut a = vec![
-        "--class".into(),
-        cfg.window.app_id.clone(),
-        "--detach".into(),
-    ];
+    let mut a = vec!["--class".into(), cfg.window.app_id.clone()];
     let mut push_o = |k: &str, v: &str| {
         a.push("-o".into());
         a.push(format!("{k}={v}"));
@@ -380,19 +378,6 @@ mod tests {
     }
 
     #[test]
-    fn wait_launcher_ok_when_child_exits_0() {
-        let mut child = std::process::Command::new("true").spawn().unwrap();
-        wait_detached_launcher(&mut child).unwrap();
-    }
-
-    #[test]
-    fn wait_launcher_err_when_child_fails() {
-        let mut child = std::process::Command::new("false").spawn().unwrap();
-        let err = wait_detached_launcher(&mut child).unwrap_err();
-        assert!(err.contains("exited"), "{err}");
-    }
-
-    #[test]
     fn empty_program_argv_errors() {
         let err = attach_argv(&Config::default(), AttachSpec::New).unwrap_err();
         assert!(err.contains("no terminal"), "{err}");
@@ -403,7 +388,10 @@ mod tests {
         let argv = attach_argv(&cfg_with("/usr/bin/kitty"), AttachSpec::Id(1)).unwrap();
         assert_eq!(argv[0], "/usr/bin/kitty");
         assert!(argv.windows(2).any(|w| w == ["--class", "vps"]));
-        assert!(argv.iter().any(|a| a == "--detach"));
+        assert!(
+            !argv.iter().any(|a| a == "--detach"),
+            "a systemd service must keep kitty as the main process"
+        );
         assert!(argv.iter().any(|a| a == "ssh"));
         assert!(argv.iter().any(|a| a.contains("vpsd attach --id 1")));
         assert!(argv
@@ -414,6 +402,14 @@ mod tests {
             !argv.iter().any(|a| a.contains("close_on_child_death")),
             "close_on_child_death=yes closes the window if ssh dies at startup"
         );
+        let wrapped = systemd_run_argv(&argv, &cfg_with("/usr/bin/kitty"));
+        assert_eq!(wrapped[0], "systemd-run");
+        assert!(wrapped.iter().any(|a| a == "--user"));
+        assert!(wrapped.iter().any(|a| a == "--no-block"));
+        assert!(wrapped.iter().any(|a| a == "--collect"));
+        let dash = wrapped.iter().position(|a| a == "--").expect("--");
+        assert_eq!(wrapped[dash + 1], "/usr/bin/kitty");
+        assert!(wrapped.iter().any(|a| a.starts_with("--setenv=TERM=")));
     }
 
     #[test]

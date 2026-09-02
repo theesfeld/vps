@@ -50,7 +50,7 @@ The session window is **the user’s terminal**. Empty `[terminal].program` → 
 - Empty `terminal.program` → chooser before attach; choice is written to `~/.config/vps/config.toml`
 - Saved `terminal.program` missing or not executable → chooser again (with a reason), not a silent spawn failure
 - Settings and picker `t` can change the terminal later
-- Super+Shift+Return: if any PTYs exist, iced picker; Enter opens the **chosen** terminal running `ssh -tt grok vpsd attach --id N` and closes the picker
+- Super+Shift+Return: if any PTYs exist, iced picker; Enter starts the **chosen** terminal via `systemd-run --user --no-block` running `ssh -tt grok vpsd attach --id N` and closes the picker (TTY must outlive niri’s vps scope)
 - Zero sessions (and a terminal already chosen): skip the picker, spawn `--new`
 - Wayland app id is `window.app_id` (`vps`) on terminals that document a class/app-id flag
 - Picker row for a grok session with a title is `grok [TITLE]`
