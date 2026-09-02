@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use iced::Font;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy)]
 pub enum AttachSpec {
@@ -12,7 +12,7 @@ pub enum AttachSpec {
     Id(u64),
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
     pub ssh: Ssh,
@@ -23,7 +23,7 @@ pub struct Config {
     pub colors: Colors,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Ssh {
     /// OpenSSH host alias (`Host` in `~/.ssh/config`).
@@ -39,14 +39,14 @@ pub struct Ssh {
     pub list: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Picker {
     /// `when_sessions` — menu if any PTYs exist; `always`; `never` (always `--new`).
     pub mode: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Window {
     pub width: f32,
@@ -55,7 +55,7 @@ pub struct Window {
     pub app_id: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct FontCfg {
     /// fontconfig family. Empty → fontconfig `monospace` (kitty's default stack).
@@ -68,14 +68,14 @@ pub struct FontCfg {
     pub extras: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Term {
     pub term: String,
     pub colorterm: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Colors {
     pub foreground: String,
@@ -96,6 +96,7 @@ pub struct Colors {
     pub bright_magenta: String,
     pub bright_cyan: String,
     pub bright_white: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub bright_foreground: Option<String>,
     pub dim_foreground: String,
     pub dim_black: String,
@@ -203,6 +204,22 @@ impl Config {
             eprintln!("vps: {path}: {e} — using defaults", path = path.display());
             Self::default()
         })
+    }
+
+    pub fn save(&self) -> Result<PathBuf, String> {
+        let path = config_path();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{dir}: {e}", dir = dir.display()))?;
+        }
+        let body = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
+        let text = format!(
+            "# written by `vps settings`. Comments live in the repo copy:\n\
+             # https://github.com/theesfeld/vps/blob/main/config/config.toml\n\
+             # Font family changes apply the next time vps starts.\n\n\
+             {body}"
+        );
+        std::fs::write(&path, text).map_err(|e| format!("{path}: {e}", path = path.display()))?;
+        Ok(path)
     }
 
     pub fn ssh_attach_argv(&self, spec: AttachSpec) -> Vec<String> {
@@ -318,5 +335,21 @@ mod tests {
         let list = cfg.ssh_list_argv();
         assert_eq!(list.first().map(String::as_str), Some("-T"));
         assert!(list[2].contains("vpsd list"));
+    }
+
+    #[test]
+    fn save_roundtrip_toml() {
+        let dir = std::env::temp_dir().join(format!("vps-cfg-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.toml");
+        let mut cfg = Config::default();
+        cfg.ssh.host = "example".into();
+        cfg.font.size = 16.0;
+        let body = toml::to_string_pretty(&cfg).unwrap();
+        std::fs::write(&path, body).unwrap();
+        let loaded: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(loaded.ssh.host, "example");
+        assert_eq!(loaded.font.size, 16.0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
