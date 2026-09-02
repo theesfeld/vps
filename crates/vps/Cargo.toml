@@ -12,6 +12,7 @@ iced = { version = "0.14", default-features = true }
 iced_term = "0.8.0"
 serde = { workspace = true }
 toml = { workspace = true }
+vps-protocol = { workspace = true }
 
 [dev-dependencies]
 toml = { workspace = true }
