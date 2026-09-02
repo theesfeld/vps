@@ -73,8 +73,8 @@ sequenceDiagram
 1. **`vps`** is an iced window (`iced_term` + `alacritty_terminal`). It is a real terminal emulator, not kitty wrapping a script. App id `vps`. Palette is Irongall with the ground shifted red.
 2. Its child is **OpenSSH**: `ssh -tt grok '/home/tj/.local/bin/vpsd attach'`. `-tt` forces a remote tty. ControlMaster on `Host grok` makes the extra hop cheap.
 3. **`vpsd attach`** requires a tty. It connects to the **Unix socket** the daemon bound (never a port).
-4. **`vpsd daemon`** (systemd `--user` on grok) owns the PTY table. `Open` reuses an **idle** session if one exists, otherwise `posix_openpt` + `TIOCSCTTY` + `bash -l`.
-5. Closing the window ends the SSH splice. The daemon **detaches**; the shell on `/dev/pts/N` keeps running. The next Super+Shift+Return attaches that session again. A second window while the first is still up gets a **new** PTY.
+4. **`vpsd daemon`** (systemd `--user` on grok) owns the PTY table and a **scrollback ring** of PTY output (`scrollback_bytes`). `open` creates a PTY; `attach --id` reconnects.
+5. Closing the window ends the SSH splice. The daemon **detaches**; the shell keeps running. Reattach **replays** stored output into the new window (the kernel PTY itself has no history), then continues live. A second window while the first is still up is a **new** PTY.
 
 `SSH_CONNECTION` is stripped from the login shell so `~/.bashrc.d/zellij.sh` does not `exec zellij` on these PTYs.
 
@@ -133,7 +133,7 @@ Replace a running binary: `systemctl --user stop vpsd` first (ETXTBSY otherwise)
 | Close the window | SSH splice ends. **The PTY stays.** `grok` / builds / vim keep running. |
 | Close the laptop | Same as close: SSH dies, daemon detaches, PTY stays. |
 | Super+Shift+Return again | Picker: **idle** sessions you can reconnect, **live** ones already in another window, **+ new session**. |
-| Enter on an idle row | `vpsd attach --id N` — same shell, same GROK BUILD. |
+| Enter on an idle row | `vpsd attach --id N` — same shell, **replayed scrollback**, then live |
 | `n` or **+ new session** | `vpsd attach --new` |
 | Enter on a **live** row | refused (that PTY is already on screen) |
 | `ssh grok` | unchanged: zellij `grok-build` |
@@ -185,6 +185,7 @@ Shipped copies are **the defaults**, commented. Every modifiable knob is a key. 
 | `listen` | `""` → `$XDG_RUNTIME_DIR/vpsd.sock` | Unix path only |
 | `shell` | `"/bin/bash"` | `bash -l` on **new** PTYs |
 | `socket_mode` | `"0600"` | Octal digits, user rw only |
+| `scrollback_bytes` | `2097152` (2 MiB) | PTY output kept so reattach can replay the screen |
 
 CLI overrides: `vpsd daemon --listen /run/user/1000/vpsd.sock`. Anything that looks like `host:port` / `tcp:` / `udp:` is rejected.
 

@@ -1,6 +1,6 @@
 //! In-memory PTY table. Sessions outlive a client splice.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
@@ -13,20 +13,23 @@ use crate::pty::{self, Session};
 pub struct Slot {
     pub session: Session,
     pub attached: bool,
+    pub scrollback: VecDeque<u8>,
 }
 
 pub struct Hub {
     next_id: u64,
     slots: HashMap<u64, Slot>,
     shell: String,
+    scrollback_limit: usize,
 }
 
 impl Hub {
-    pub fn new(shell: String) -> Self {
+    pub fn new(shell: String, scrollback_limit: usize) -> Self {
         Self {
             next_id: 1,
             slots: HashMap::new(),
             shell,
+            scrollback_limit: scrollback_limit.max(4096),
         }
     }
 
@@ -42,6 +45,7 @@ impl Hub {
             Slot {
                 session,
                 attached: true,
+                scrollback: VecDeque::new(),
             },
         );
         Ok((id, clone))
@@ -61,12 +65,45 @@ impl Hub {
         }
         slot.attached = true;
         let _ = pty::set_winsize(slot.session.master.as_raw_fd(), &ws);
-        let pid = slot.session.child.id() as i32;
-        let _ = kill(Pid::from_raw(pid), Signal::SIGWINCH);
         slot.session
             .master
             .try_clone()
             .map_err(std::io::Error::other)
+    }
+
+    pub fn scrollback(&self, id: u64) -> Vec<u8> {
+        self.slots
+            .get(&id)
+            .map(|s| s.scrollback.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn push_output(&mut self, id: u64, bytes: &[u8]) {
+        let Some(slot) = self.slots.get_mut(&id) else {
+            return;
+        };
+        let limit = self.scrollback_limit;
+        slot.scrollback.extend(bytes);
+        let mut trimmed = false;
+        while slot.scrollback.len() > limit {
+            slot.scrollback.pop_front();
+            trimmed = true;
+        }
+        if trimmed {
+            while let Some(b) = slot.scrollback.front().copied() {
+                slot.scrollback.pop_front();
+                if b == b'\n' {
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn winch(&self, id: u64) {
+        if let Some(slot) = self.slots.get(&id) {
+            let pid = slot.session.child.id() as i32;
+            let _ = kill(Pid::from_raw(pid), Signal::SIGWINCH);
+        }
     }
 
     pub fn list(&mut self) -> Vec<SessionInfo> {
@@ -184,6 +221,6 @@ fn proc_ppid(pid: u32) -> Option<u32> {
 
 pub type SharedHub = Arc<Mutex<Hub>>;
 
-pub fn new_shared(shell: String) -> SharedHub {
-    Arc::new(Mutex::new(Hub::new(shell)))
+pub fn new_shared_with_limit(shell: String, scrollback_limit: usize) -> SharedHub {
+    Arc::new(Mutex::new(Hub::new(shell, scrollback_limit)))
 }
