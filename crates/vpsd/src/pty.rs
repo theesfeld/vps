@@ -37,7 +37,6 @@ pub fn read_tty_winsize(fd: i32) -> Option<Winsize> {
     }
 }
 
-#[allow(dead_code)]
 pub fn set_winsize(fd: i32, ws: &Winsize) -> std::io::Result<()> {
     let rc = unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, ws) };
     if rc == 0 {

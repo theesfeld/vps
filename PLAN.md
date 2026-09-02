@@ -41,3 +41,5 @@ Mosh is the wrong tunnel for a mux (it *is* a PTY, and it listens on UDP). SSH i
 - `vps` opens a red native window whose child is `ssh -t grok vpsd attach`
 - Super+Shift+Return spawns `vps`
 - grok firewall still has no extra public port
+- Close window, reopen, same shell (`VPSD_PERSIST` test)
+- `~/.config/vps/config.toml` / `vpsd.toml` document every knob

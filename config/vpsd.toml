@@ -1,0 +1,14 @@
+# vpsd — copy to ~/.config/vps/vpsd.toml on grok
+#
+# Every field is optional. Omitted keys use these defaults
+# (see crates/vpsd/src/config.rs).
+
+# Unix socket path. Empty → `$XDG_RUNTIME_DIR/vpsd.sock`.
+# Must be a filesystem path. TCP/UDP/host:port is refused.
+listen = ""
+
+# Login shell on each *new* PTY (`bash -l`). Reattach reuses the same process.
+shell = "/bin/bash"
+
+# Socket mode as octal digits. 0600 = user rw only.
+socket_mode = "0600"

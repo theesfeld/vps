@@ -1,5 +1,8 @@
 # Status
 
-Phase: native window works. Super+Shift+Return → `vps` → `ssh -tt grok vpsd attach` → `/dev/pts/N` on grok. `vpsd` listens on `$XDG_RUNTIME_DIR/vpsd.sock` only (no TCP/UDP). `cargo test` and `cargo clippy -D warnings` pass.
+Phase: persistence + documented TOML.
 
-Left: persistence across client close (daemon already binds; attach is still one-shot per SSH). Release `vps` binary (debug is installed for the live window).
+- Close window detaches; next `Open` reuses the idle PTY (`persist_session_across_disconnect`).
+- Client `~/.config/vps/config.toml` and daemon `vpsd.toml` — shipped copies in `config/` are the defaults; every knob is a key.
+- README covers architecture, threat model, install, config tables.
+- `cargo test` / `clippy -D warnings` pass.

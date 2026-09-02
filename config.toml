@@ -1,3 +1,3 @@
-# Copy to ~/.config/vps/config.toml (optional; these are the defaults).
-host = "grok"
-remote = ["/home/tj/.local/bin/vpsd attach"]
+# Moved to config/config.toml (client) and config/vpsd.toml (daemon).
+# Install: cp config/config.toml ~/.config/vps/config.toml
+

@@ -13,12 +13,29 @@ pub const SOCKET_NAME: &str = "vpsd.sock";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Message {
-    Hello { v: u32 },
-    Open { cols: u16, rows: u16 },
-    Resize { cols: u16, rows: u16 },
+    Hello {
+        v: u32,
+        #[serde(default)]
+        id: u64,
+    },
+    /// Client wants a session. Daemon reuses an idle PTY if one exists.
+    Open {
+        cols: u16,
+        rows: u16,
+    },
+    Resize {
+        #[serde(default)]
+        id: u64,
+        cols: u16,
+        rows: u16,
+    },
     Close,
-    Exit { code: i32 },
-    Error { msg: String },
+    Exit {
+        code: i32,
+    },
+    Error {
+        msg: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,8 +185,15 @@ mod tests {
 
     #[test]
     fn json_hello_tag() {
-        let line = encode_line(&Message::Hello { v: VERSION }).unwrap();
+        let line = encode_line(&Message::Hello { v: VERSION, id: 7 }).unwrap();
         assert!(line.contains("\"t\":\"hello\""));
         assert!(line.contains("\"v\":1"));
+        assert!(line.contains("\"id\":7"));
+    }
+
+    #[test]
+    fn json_hello_id_defaults_when_omitted() {
+        let msg = decode_line(r#"{"t":"hello","v":1}"#).unwrap();
+        assert_eq!(msg, Message::Hello { v: 1, id: 0 });
     }
 }

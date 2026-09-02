@@ -3543,7 +3543,8 @@ dependencies = [
  "clap",
  "libc",
  "nix",
- "tokio",
+ "serde",
+ "toml",
  "vps-protocol",
 ]
 

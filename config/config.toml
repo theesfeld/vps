@@ -1,0 +1,66 @@
+# vps client — copy to ~/.config/vps/config.toml
+#
+# Every field below is optional. Omitted keys use the same values shown here
+# (see crates/vps/src/config.rs Default impls).
+#
+# Reload: restart the `vps` process (Super+Shift+Return a new window).
+
+[ssh]
+# OpenSSH alias from ~/.ssh/config (Host grok → 10.64.0.1 on WireGuard).
+host = "grok"
+# Inserted as `ssh <args...> <host> <remote>`.
+# `-tt` forces a remote tty even if the local side looks non-interactive.
+args = ["-tt"]
+# ONE string. OpenSSH joins extra argv with spaces and runs `$SHELL -c "..."`.
+# Do not split this into `vpsd` + `attach` as separate args.
+remote = "/home/tj/.local/bin/vpsd attach"
+
+[window]
+# Initial size in physical pixels. niri may still tile/stretch the window.
+width = 1280.0
+height = 800.0
+# Wayland xdg_app_id. niri `match app-id="^vps$"`.
+app_id = "vps"
+
+[font]
+# fontconfig family. Empty string → iced built-in monospace.
+family = "Berkeley Mono"
+# Glyph size in pixels (iced `Pixels`). Line height is size × scale.
+size = 18.0
+scale = 1.3
+
+[term]
+# Advertised to the remote shell. mosh/kitty terminfo is not used; this path is SSH.
+term = "xterm-256color"
+colorterm = "truecolor"
+
+# Irongall palette with the ground shifted toward red so a VPS window is obvious.
+[colors]
+foreground = "#ede6de"
+background = "#241018"
+black = "#241018"
+red = "#e03818"
+green = "#3d9650"
+yellow = "#e0bc55"
+blue = "#1e8ae8"
+magenta = "#d47a82"
+cyan = "#16a8b6"
+white = "#ede6de"
+bright_black = "#4a2830"
+bright_red = "#e5563b"
+bright_green = "#5aa66a"
+bright_yellow = "#e5c66f"
+bright_blue = "#409ceb"
+bright_magenta = "#da8e95"
+bright_cyan = "#39b5c1"
+bright_white = "#b8c0c8"
+# bright_foreground = "#ede6de"   # optional; omit to use `foreground`
+dim_foreground = "#8e7a76"
+dim_black = "#14080c"
+dim_red = "#8a2010"
+dim_green = "#245830"
+dim_yellow = "#8a7030"
+dim_blue = "#145080"
+dim_magenta = "#804850"
+dim_cyan = "#0c6870"
+dim_white = "#6e6460"
