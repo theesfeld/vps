@@ -141,13 +141,17 @@ impl Hub {
             .iter()
             .map(|(id, slot)| {
                 let pid = slot.session.child.id();
+                let cwd = proc_cwd(pid);
+                let command = proc_command(pid);
+                let title = grok_title(&cwd, &command);
                 SessionInfo {
                     id: *id,
                     pts: slot.session.pts_name.clone(),
                     pid,
                     attached: slot.attached,
-                    cwd: proc_cwd(pid),
-                    command: proc_command(pid),
+                    cwd,
+                    command,
+                    title,
                 }
             })
             .collect();
@@ -185,6 +189,53 @@ impl Hub {
             self.slots.remove(&id);
         }
     }
+}
+
+fn grok_title(cwd: &str, command: &str) -> String {
+    if !command.split_whitespace().any(|w| w.ends_with("grok") || w == "grok") {
+        return String::new();
+    }
+    if cwd.is_empty() {
+        return String::new();
+    }
+    let encoded = cwd.replace('/', "%2F");
+    let dir = format!(
+        "{home}/.grok/sessions/{encoded}",
+        home = std::env::var("HOME").unwrap_or_else(|_| "/home/tj".into())
+    );
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return String::new();
+    };
+    let mut best: Option<(String, String)> = None; // last_active, title
+    for ent in rd.flatten() {
+        let path = ent.path().join("summary.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let title = v
+            .get("generated_title")
+            .and_then(|x| x.as_str())
+            .or_else(|| v.get("session_summary").and_then(|x| x.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if title.is_empty() {
+            continue;
+        }
+        let active = v
+            .get("last_active_at")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        match &best {
+            Some((a, _)) if a.as_str() >= active.as_str() => {}
+            _ => best = Some((active, title)),
+        }
+    }
+    best.map(|(_, t)| t).unwrap_or_default()
 }
 
 fn proc_cwd(pid: u32) -> String {

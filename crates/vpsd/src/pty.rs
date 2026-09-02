@@ -37,6 +37,22 @@ pub fn read_tty_winsize(fd: i32) -> Option<Winsize> {
     }
 }
 
+/// Discard pending master output (queued TUI frames while detached).
+pub fn drain(fd: i32, mut on_bytes: impl FnMut(&[u8])) {
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = libc::read(fd, buf.as_mut_ptr() as *mut _, buf.len());
+            if n <= 0 {
+                break;
+            }
+            on_bytes(&buf[..n as usize]);
+        }
+    }
+}
+
 pub fn set_winsize(fd: i32, ws: &Winsize) -> std::io::Result<()> {
     let rc = unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, ws) };
     if rc == 0 {

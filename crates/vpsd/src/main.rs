@@ -216,6 +216,12 @@ fn splice_session(
             .map_err(|e| std::io::Error::other(e.to_string()))?
             .is_tui(id);
         if tui {
+            {
+                let mut h = hub
+                    .lock()
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                pty::drain(master.as_raw_fd(), |b| h.push_output(id, b));
+            }
             let hub_r = hub.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(80));

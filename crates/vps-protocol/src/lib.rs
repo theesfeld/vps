@@ -18,6 +18,9 @@ pub struct SessionInfo {
     pub attached: bool,
     pub cwd: String,
     pub command: String,
+    /// Grok generated/renamed title, if any.
+    #[serde(default)]
+    pub title: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,6 +230,7 @@ mod tests {
                 attached: false,
                 cwd: "/home/tj".into(),
                 command: "grok".into(),
+                title: "FOO".into(),
             }],
         };
         let line = encode_line(&msg).unwrap();
