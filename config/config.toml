@@ -13,7 +13,17 @@ host = "grok"
 args = ["-tt"]
 # ONE string. OpenSSH joins extra argv with spaces and runs `$SHELL -c "..."`.
 # Do not split this into `vpsd` + `attach` as separate args.
+# `vps` appends ` --new` or ` --id N`.
 remote = "/home/tj/.local/bin/vpsd attach"
+# List hop: no tty. `ssh <list_args...> <host> <list>`
+list_args = ["-T"]
+list = "/home/tj/.local/bin/vpsd list"
+
+[picker]
+# when_sessions — menu if any PTYs exist (default)
+# always — always show the menu (even when empty)
+# never — skip the menu, always --new
+mode = "when_sessions"
 
 [window]
 # Initial size in physical pixels. niri may still tile/stretch the window.

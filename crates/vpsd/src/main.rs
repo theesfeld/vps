@@ -46,7 +46,15 @@ enum Cmd {
         rows: Option<u16>,
         #[arg(long)]
         shell: Option<String>,
+        /// Reconnect to this session id.
+        #[arg(long)]
+        id: Option<u64>,
+        /// Always create a new PTY (default if `--id` is omitted).
+        #[arg(long)]
+        new: bool,
     },
+    /// Print session list as one JSON line (no tty). Used by the laptop picker.
+    List,
 }
 
 fn main() {
@@ -64,12 +72,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let spec = listen.unwrap_or_else(|| cfg.socket_path().display().to_string());
             daemon(&spec, cfg.shell.clone(), cfg.mode_bits())?
         }
-        Cmd::Attach { cols, rows, shell } => attach(
+        Cmd::Attach {
+            cols,
+            rows,
+            shell,
+            id,
+            new,
+        } => attach(
             cols,
             rows,
             shell.as_deref().unwrap_or(cfg.shell.as_str()),
+            id,
+            new,
             &cfg,
         )?,
+        Cmd::List => list_cmd(&cfg)?,
     }
     Ok(())
 }
@@ -115,37 +132,31 @@ fn handle_unix_client(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let text = read_line(&mut stream)?;
     match decode_line(&text)? {
+        Message::List => {
+            let sessions = hub
+                .lock()
+                .map_err(|e| std::io::Error::other(e.to_string()))?
+                .list();
+            stream.write_all(encode_line(&Message::Sessions { sessions })?.as_bytes())?;
+        }
         Message::Open { cols, rows } => {
             let (id, master) = hub
                 .lock()
                 .map_err(|e| std::io::Error::other(e.to_string()))?
-                .take_or_create(cols, rows)?;
-            let pts = hub
+                .create(cols, rows)?;
+            splice_session(&mut stream, hub, id, master)?;
+        }
+        Message::Attach { id, cols, rows } => {
+            let master = hub
                 .lock()
-                .ok()
-                .and_then(|h| h.pts_name(id).map(str::to_string))
-                .unwrap_or_default();
-            let _ = stream.write_all(
-                encode_line(&Message::Hello {
-                    v: vps_protocol::VERSION,
-                    id,
-                })?
-                .as_bytes(),
-            );
-            eprintln!("vpsd: session {id} pts {pts}");
-            let end = splice_fds(stream.as_raw_fd(), stream.as_raw_fd(), master.as_raw_fd())?;
-            let mut h = hub
-                .lock()
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            match end {
-                SpliceEnd::ClientGone => h.detach(id),
-                SpliceEnd::MasterGone => h.drop_session(id),
-            }
+                .map_err(|e| std::io::Error::other(e.to_string()))?
+                .attach(id, cols, rows)?;
+            splice_session(&mut stream, hub, id, master)?;
         }
         other => {
             let _ = stream.write_all(
                 encode_line(&Message::Error {
-                    msg: format!("expected open, got {other:?}"),
+                    msg: format!("expected list, open, or attach, got {other:?}"),
                 })?
                 .as_bytes(),
             );
@@ -154,14 +165,58 @@ fn handle_unix_client(
     Ok(())
 }
 
+fn splice_session(
+    stream: &mut UnixStream,
+    hub: SharedHub,
+    id: u64,
+    master: std::os::fd::OwnedFd,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let pts = hub
+        .lock()
+        .ok()
+        .and_then(|h| h.pts_name(id).map(str::to_string))
+        .unwrap_or_default();
+    stream.write_all(
+        encode_line(&Message::Hello {
+            v: vps_protocol::VERSION,
+            id,
+        })?
+        .as_bytes(),
+    )?;
+    eprintln!("vpsd: session {id} pts {pts}");
+    let end = splice_fds(stream.as_raw_fd(), stream.as_raw_fd(), master.as_raw_fd())?;
+    let mut h = hub
+        .lock()
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    match end {
+        SpliceEnd::ClientGone => h.detach(id),
+        SpliceEnd::MasterGone => h.drop_session(id),
+    }
+    Ok(())
+}
+
+fn list_cmd(cfg: &DaemonConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let sock = cfg.socket_path();
+    let mut stream = UnixStream::connect(&sock)?;
+    stream.write_all(encode_line(&Message::List)?.as_bytes())?;
+    let line = read_line(&mut stream)?;
+    println!("{}", line.trim());
+    Ok(())
+}
+
 fn attach(
     cols: Option<u16>,
     rows: Option<u16>,
     shell: &str,
+    id: Option<u64>,
+    new: bool,
     cfg: &DaemonConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !stdin_is_tty() {
         return Err("attach requires a tty (ssh -tt grok vpsd attach)".into());
+    }
+    if new && id.is_some() {
+        return Err("--new and --id cannot both be set".into());
     }
     let ws = match (cols, rows) {
         (Some(c), Some(r)) => pty::winsize(c, r),
@@ -169,15 +224,30 @@ fn attach(
     };
     let sock = cfg.socket_path();
     if sock.exists() {
-        attach_via_daemon(&sock, ws.ws_col, ws.ws_row)?;
+        let req = if let Some(id) = id {
+            Message::Attach {
+                id,
+                cols: ws.ws_col,
+                rows: ws.ws_row,
+            }
+        } else {
+            Message::Open {
+                cols: ws.ws_col,
+                rows: ws.ws_row,
+            }
+        };
+        attach_via_daemon(&sock, req)?;
         return Ok(());
+    }
+    if id.is_some() {
+        return Err("daemon is not running; cannot attach by id".into());
     }
     attach_oneshot(ws, shell)
 }
 
-fn attach_via_daemon(sock: &Path, cols: u16, rows: u16) -> Result<(), Box<dyn std::error::Error>> {
+fn attach_via_daemon(sock: &Path, req: Message) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = UnixStream::connect(sock)?;
-    stream.write_all(encode_line(&Message::Open { cols, rows })?.as_bytes())?;
+    stream.write_all(encode_line(&req)?.as_bytes())?;
     let hello = read_line(&mut stream)?;
     match decode_line(&hello)? {
         Message::Hello { id, .. } => {
@@ -397,18 +467,35 @@ mod tests {
         drop(a);
         std::thread::sleep(Duration::from_millis(150));
 
+        let mut listing = UnixStream::connect(&path).unwrap();
+        listing
+            .write_all(encode_line(&Message::List).unwrap().as_bytes())
+            .unwrap();
+        let listed = read_line(&mut listing).unwrap();
+        drop(listing);
+        let Message::Sessions { sessions } = decode_line(&listed).unwrap() else {
+            panic!("not sessions: {listed}");
+        };
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, id);
+        assert!(!sessions[0].attached);
+
         let mut b = UnixStream::connect(&path).unwrap();
         b.write_all(
-            encode_line(&Message::Open { cols: 80, rows: 24 })
-                .unwrap()
-                .as_bytes(),
+            encode_line(&Message::Attach {
+                id,
+                cols: 80,
+                rows: 24,
+            })
+            .unwrap()
+            .as_bytes(),
         )
         .unwrap();
         let hello2 = read_line(&mut b).unwrap();
         let Message::Hello { id: id2, .. } = decode_line(&hello2).unwrap() else {
             panic!("not hello: {hello2}");
         };
-        assert_eq!(id, id2, "should reuse idle session");
+        assert_eq!(id, id2, "should reconnect the same session");
         b.write_all(b"printf 'GOT=%s\\n' \"$VPSD_PERSIST\"\n")
             .unwrap();
         let got = read_until(&mut b, b"GOT=keep", Duration::from_secs(3));

@@ -9,5 +9,6 @@
 | D5 | Config TOML | `~/.config/vps/config.toml` |
 | D6 | iced + iced_term + alacritty_terminal | Documented Rust terminal widget; child program is ssh |
 | D7 | Real PTY via `nix::pty::openpty` + TIOCSCTTY | POSIX pty(7), not a pipe |
-| D8 | Daemon owns PTYs; attach is a splice | Close window = detach; next Open reuses idle |
+| D8 | Daemon owns PTYs; attach is a splice | Close window = detach; PTY stays |
+| D10 | Super+Shift+Return shows a picker | List idle/live sessions; choose reconnect or new. No silent grab of the first idle PTY. |
 | D9 | Two TOML files, every knob named | Laptop `config.toml`, grok `vpsd.toml`; shipped copies are the defaults |

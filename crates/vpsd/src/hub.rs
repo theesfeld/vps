@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
+use vps_protocol::SessionInfo;
 
 use crate::pty::{self, Session};
 
@@ -29,28 +30,9 @@ impl Hub {
         }
     }
 
-    /// Reuse an idle living session, or spawn a new PTY.
-    pub fn take_or_create(&mut self, cols: u16, rows: u16) -> std::io::Result<(u64, OwnedFd)> {
+    pub fn create(&mut self, cols: u16, rows: u16) -> std::io::Result<(u64, OwnedFd)> {
         self.reap();
         let ws = pty::winsize(cols, rows);
-        let idle = self
-            .slots
-            .iter()
-            .find(|(_, s)| !s.attached)
-            .map(|(id, _)| *id);
-        if let Some(id) = idle {
-            let slot = self.slots.get_mut(&id).expect("idle id");
-            slot.attached = true;
-            let _ = pty::set_winsize(slot.session.master.as_raw_fd(), &ws);
-            let pid = slot.session.child.id() as i32;
-            let _ = kill(Pid::from_raw(pid), Signal::SIGWINCH);
-            let clone = slot
-                .session
-                .master
-                .try_clone()
-                .map_err(std::io::Error::other)?;
-            return Ok((id, clone));
-        }
         let session = pty::spawn_login_shell(ws, &self.shell)?;
         let clone = session.master.try_clone().map_err(std::io::Error::other)?;
         let id = self.next_id;
@@ -63,6 +45,49 @@ impl Hub {
             },
         );
         Ok((id, clone))
+    }
+
+    pub fn attach(&mut self, id: u64, cols: u16, rows: u16) -> std::io::Result<OwnedFd> {
+        self.reap();
+        let ws = pty::winsize(cols, rows);
+        let slot = self
+            .slots
+            .get_mut(&id)
+            .ok_or_else(|| std::io::Error::other(format!("no session {id}")))?;
+        if slot.attached {
+            return Err(std::io::Error::other(format!(
+                "session {id} already attached"
+            )));
+        }
+        slot.attached = true;
+        let _ = pty::set_winsize(slot.session.master.as_raw_fd(), &ws);
+        let pid = slot.session.child.id() as i32;
+        let _ = kill(Pid::from_raw(pid), Signal::SIGWINCH);
+        slot.session
+            .master
+            .try_clone()
+            .map_err(std::io::Error::other)
+    }
+
+    pub fn list(&mut self) -> Vec<SessionInfo> {
+        self.reap();
+        let mut out: Vec<SessionInfo> = self
+            .slots
+            .iter()
+            .map(|(id, slot)| {
+                let pid = slot.session.child.id();
+                SessionInfo {
+                    id: *id,
+                    pts: slot.session.pts_name.clone(),
+                    pid,
+                    attached: slot.attached,
+                    cwd: proc_cwd(pid),
+                    command: proc_command(pid),
+                }
+            })
+            .collect();
+        out.sort_by_key(|s| s.id);
+        out
     }
 
     pub fn detach(&mut self, id: u64) {
@@ -95,6 +120,66 @@ impl Hub {
             self.slots.remove(&id);
         }
     }
+}
+
+fn proc_cwd(pid: u32) -> String {
+    std::fs::read_link(format!("/proc/{pid}/cwd"))
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
+}
+
+fn proc_command(pid: u32) -> String {
+    if let Some(child) = first_non_shell_child(pid) {
+        let cmd = cmdline(child);
+        if !cmd.is_empty() {
+            return cmd;
+        }
+    }
+    cmdline(pid)
+}
+
+fn cmdline(pid: u32) -> String {
+    let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+    bytes
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn first_non_shell_child(pid: u32) -> Option<u32> {
+    let dir = std::fs::read_dir("/proc").ok()?;
+    for ent in dir.flatten() {
+        let name = ent.file_name();
+        let Ok(child) = name.to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if proc_ppid(child) != Some(pid) {
+            continue;
+        }
+        let cmd = cmdline(child);
+        if cmd.is_empty() {
+            continue;
+        }
+        let base = cmd.split_whitespace().next().unwrap_or("");
+        let base = base.rsplit('/').next().unwrap_or(base);
+        if matches!(base, "bash" | "sh" | "zsh" | "fish" | "dash") {
+            continue;
+        }
+        return Some(child);
+    }
+    None
+}
+
+fn proc_ppid(pid: u32) -> Option<u32> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("PPid:") {
+            return rest.trim().parse().ok();
+        }
+    }
+    None
 }
 
 pub type SharedHub = Arc<Mutex<Hub>>;

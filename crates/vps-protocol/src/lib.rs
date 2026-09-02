@@ -11,6 +11,16 @@ pub const VERSION: u32 = 1;
 pub const SOCKET_NAME: &str = "vpsd.sock";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub id: u64,
+    pub pts: String,
+    pub pid: u32,
+    pub attached: bool,
+    pub cwd: String,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Message {
     Hello {
@@ -18,10 +28,20 @@ pub enum Message {
         #[serde(default)]
         id: u64,
     },
-    /// Client wants a session. Daemon reuses an idle PTY if one exists.
+    /// Always create a new PTY.
     Open {
         cols: u16,
         rows: u16,
+    },
+    /// Reconnect to an existing PTY by id.
+    Attach {
+        id: u64,
+        cols: u16,
+        rows: u16,
+    },
+    List,
+    Sessions {
+        sessions: Vec<SessionInfo>,
     },
     Resize {
         #[serde(default)]
@@ -195,5 +215,21 @@ mod tests {
     fn json_hello_id_defaults_when_omitted() {
         let msg = decode_line(r#"{"t":"hello","v":1}"#).unwrap();
         assert_eq!(msg, Message::Hello { v: 1, id: 0 });
+    }
+
+    #[test]
+    fn json_roundtrip_sessions() {
+        let msg = Message::Sessions {
+            sessions: vec![SessionInfo {
+                id: 3,
+                pts: "/dev/pts/4".into(),
+                pid: 9,
+                attached: false,
+                cwd: "/home/tj".into(),
+                command: "grok".into(),
+            }],
+        };
+        let line = encode_line(&msg).unwrap();
+        assert_eq!(decode_line(&line).unwrap(), msg);
     }
 }

@@ -127,14 +127,20 @@ Replace a running binary: `systemctl --user stop vpsd` first (ETXTBSY otherwise)
 
 ## Daily use
 
-| Key | What |
+| You do | What happens on grok |
 | --- | --- |
-| Super+Return | local kitty |
-| Super+Shift+Return | `vps` → grok PTY |
-| Close the window | detach; jobs keep running on grok |
-| Super+Shift+Return again | same shell (idle session) |
-| Second window while one is open | new PTY |
+| Super+Shift+Return | `vps` lists PTYs over SSH (`vpsd list`). If any exist, a picker. If none, a new PTY. |
+| Close the window | SSH splice ends. **The PTY stays.** `grok` / builds / vim keep running. |
+| Close the laptop | Same as close: SSH dies, daemon detaches, PTY stays. |
+| Super+Shift+Return again | Picker: **idle** sessions you can reconnect, **live** ones already in another window, **+ new session**. |
+| Enter on an idle row | `vpsd attach --id N` — same shell, same GROK BUILD. |
+| `n` or **+ new session** | `vpsd attach --new` |
+| Enter on a **live** row | refused (that PTY is already on screen) |
 | `ssh grok` | unchanged: zellij `grok-build` |
+
+Picker keys: `↑↓` / `j k`, `enter`, `n` new, `esc` quit.
+
+There is no auto-grab of “the first idle PTY.” You choose.
 
 ---
 
@@ -155,7 +161,10 @@ Shipped copies are **the defaults**, commented. Every modifiable knob is a key. 
 | --- | --- | --- | --- |
 | `[ssh]` | `host` | `"grok"` | OpenSSH `Host` alias |
 | `[ssh]` | `args` | `["-tt"]` | Extra argv before the host |
-| `[ssh]` | `remote` | `"/home/tj/.local/bin/vpsd attach"` | **One** `$SHELL -c` string |
+| `[ssh]` | `remote` | `"/home/tj/.local/bin/vpsd attach"` | **One** `$SHELL -c` string; `vps` appends `--new` / `--id N` |
+| `[ssh]` | `list` | `"/home/tj/.local/bin/vpsd list"` | JSON session list, no tty |
+| `[ssh]` | `list_args` | `["-T"]` | ssh argv for the list hop |
+| `[picker]` | `mode` | `"when_sessions"` | `when_sessions` / `always` / `never` |
 | `[window]` | `width` / `height` | `1280.0` / `800.0` | Initial size (pixels) |
 | `[window]` | `app_id` | `"vps"` | Wayland app id |
 | `[font]` | `family` | `"Berkeley Mono"` | fontconfig family; empty = iced monospace |
@@ -190,7 +199,13 @@ JSON, one object per line, then raw PTY bytes. Control never shares a TCP port.
 {"t":"hello","v":1,"id":3}
 ```
 
-After `hello`, both sides splice 8-bit data. Client EOF → daemon **detaches** (shell stays). PTY master EOF → session dropped.
+```json
+{"t":"list"}
+{"t":"sessions","sessions":[{"id":1,"pts":"/dev/pts/4","pid":9,"attached":false,"cwd":"/home/tj","command":"grok"}]}
+{"t":"attach","id":1,"cols":80,"rows":24}
+```
+
+After `hello`, both sides splice 8-bit data. Client EOF → daemon **detaches** (shell stays). PTY master EOF → session dropped. `open` always creates a new PTY; reconnect is `attach` by id.
 
 ---
 

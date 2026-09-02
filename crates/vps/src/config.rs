@@ -6,10 +6,17 @@ use std::path::PathBuf;
 use iced::Font;
 use serde::Deserialize;
 
+#[derive(Debug, Clone, Copy)]
+pub enum AttachSpec {
+    New,
+    Id(u64),
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub ssh: Ssh,
+    pub picker: Picker,
     pub window: Window,
     pub font: FontCfg,
     pub term: Term,
@@ -23,8 +30,20 @@ pub struct Ssh {
     pub host: String,
     /// Extra argv inserted after `ssh` and before `host` (e.g. `-tt`).
     pub args: Vec<String>,
-    /// Remote command as **one** string. OpenSSH runs `$SHELL -c "<this>"`.
+    /// Remote attach command as **one** string. OpenSSH runs `$SHELL -c "<this>"`.
+    /// `vps` appends ` --new` or ` --id N`.
     pub remote: String,
+    /// Extra argv for the list hop (`ssh <list_args...> <host> <list>`). No tty.
+    pub list_args: Vec<String>,
+    /// Remote list command as **one** string.
+    pub list: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Picker {
+    /// `when_sessions` — menu if any PTYs exist; `always`; `never` (always `--new`).
+    pub mode: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -93,6 +112,16 @@ impl Default for Ssh {
             host: "grok".into(),
             args: vec!["-tt".into()],
             remote: "/home/tj/.local/bin/vpsd attach".into(),
+            list_args: vec!["-T".into()],
+            list: "/home/tj/.local/bin/vpsd list".into(),
+        }
+    }
+}
+
+impl Default for Picker {
+    fn default() -> Self {
+        Self {
+            mode: "when_sessions".into(),
         }
     }
 }
@@ -173,11 +202,30 @@ impl Config {
         })
     }
 
-    pub fn ssh_argv(&self) -> Vec<String> {
+    pub fn ssh_attach_argv(&self, spec: AttachSpec) -> Vec<String> {
         let mut a = self.ssh.args.clone();
         a.push(self.ssh.host.clone());
-        a.push(self.ssh.remote.clone());
+        let cmd = match spec {
+            AttachSpec::New => format!("{} --new", self.ssh.remote),
+            AttachSpec::Id(id) => format!("{} --id {id}", self.ssh.remote),
+        };
+        a.push(cmd);
         a
+    }
+
+    pub fn ssh_list_argv(&self) -> Vec<String> {
+        let mut a = self.ssh.list_args.clone();
+        a.push(self.ssh.host.clone());
+        a.push(self.ssh.list.clone());
+        a
+    }
+
+    pub fn want_picker(&self, session_count: usize) -> bool {
+        match self.picker.mode.as_str() {
+            "never" => false,
+            "always" => true,
+            _ => session_count > 0,
+        }
     }
 
     pub fn iced_font(&self) -> Font {
@@ -262,9 +310,14 @@ mod tests {
     #[test]
     fn ssh_argv_is_tt_host_remote() {
         let cfg = Config::default();
-        let argv = cfg.ssh_argv();
+        let argv = cfg.ssh_attach_argv(AttachSpec::New);
         assert_eq!(argv.first().map(String::as_str), Some("-tt"));
         assert_eq!(argv.get(1).map(String::as_str), Some("grok"));
-        assert!(argv[2].contains("vpsd attach"));
+        assert!(argv[2].contains("vpsd attach --new"), "{}", argv[2]);
+        let id = cfg.ssh_attach_argv(AttachSpec::Id(4));
+        assert!(id[2].contains("--id 4"), "{}", id[2]);
+        let list = cfg.ssh_list_argv();
+        assert_eq!(list.first().map(String::as_str), Some("-T"));
+        assert!(list[2].contains("vpsd list"));
     }
 }
