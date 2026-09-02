@@ -173,7 +173,9 @@ fn kitty_flags(cfg: &Config) -> Vec<String> {
     push_o("color13", &c.bright_magenta);
     push_o("color14", &c.bright_cyan);
     push_o("color15", &c.bright_white);
-    push_o("close_on_child_death", "yes");
+    // Do not set close_on_child_death=yes: kitty then destroys the window if
+    // ssh exits during startup (ControlMaster / 0-size pty), which looks like
+    // "Enter does nothing". Default is no; the user closes the window to detach.
     push_o("confirm_os_window_close", "0");
     a
 }
@@ -287,6 +289,10 @@ mod tests {
             .iter()
             .any(|a| a == "background=#241018" || a.contains("background=#241018")));
         assert!(!argv.iter().any(|a| a.contains("font_family=")));
+        assert!(
+            !argv.iter().any(|a| a.contains("close_on_child_death")),
+            "close_on_child_death=yes closes the window if ssh dies at startup"
+        );
     }
 
     #[test]
