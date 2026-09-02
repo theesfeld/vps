@@ -135,7 +135,25 @@ pub fn spawn_session(cfg: &Config, spec: AttachSpec) -> Result<(), String> {
     for (k, v) in cfg.term_env() {
         cmd.env(k, v);
     }
-    cmd.spawn().map_err(|e| format!("{bin}: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| format!("{bin}: {e}"))?;
+    // kitty --detach: the process we spawned is a launcher that exits once
+    // the OS window exists. Closing the iced picker before that exits kills
+    // kitty (window opens, then dies). Other emulators stay as the child.
+    if basename(bin) == "kitty" {
+        wait_detached_launcher(&mut child)?;
+    }
+    Ok(())
+}
+
+fn wait_detached_launcher(child: &mut std::process::Child) -> Result<(), String> {
+    for _ in 0..50 {
+        match child.try_wait() {
+            Ok(Some(st)) if st.success() => return Ok(()),
+            Ok(Some(st)) => return Err(format!("terminal launcher exited {st}")),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(40)),
+            Err(e) => return Err(format!("wait launcher: {e}")),
+        }
+    }
     Ok(())
 }
 
@@ -359,6 +377,19 @@ mod tests {
         assert!(needs_chooser(&cfg));
         let msg = missing_terminal_message(&cfg).expect("reason");
         assert!(msg.contains("not found on PATH"), "{msg}");
+    }
+
+    #[test]
+    fn wait_launcher_ok_when_child_exits_0() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        wait_detached_launcher(&mut child).unwrap();
+    }
+
+    #[test]
+    fn wait_launcher_err_when_child_fails() {
+        let mut child = std::process::Command::new("false").spawn().unwrap();
+        let err = wait_detached_launcher(&mut child).unwrap_err();
+        assert!(err.contains("exited"), "{err}");
     }
 
     #[test]
