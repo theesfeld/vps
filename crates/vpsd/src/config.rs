@@ -14,6 +14,8 @@ pub struct DaemonConfig {
     pub shell: String,
     /// Socket file mode as an octal string (`"0600"`). Never world-accessible.
     pub socket_mode: String,
+    /// PTY output kept for reattach, in bytes. Oldest data is dropped.
+    pub scrollback_bytes: usize,
 }
 
 impl Default for DaemonConfig {
@@ -22,6 +24,7 @@ impl Default for DaemonConfig {
             listen: String::new(),
             shell: "/bin/bash".into(),
             socket_mode: "0600".into(),
+            scrollback_bytes: 2 * 1024 * 1024,
         }
     }
 }
@@ -74,5 +77,6 @@ mod tests {
         assert_eq!(cfg.shell, "/bin/bash");
         assert_eq!(cfg.socket_mode, "0600");
         assert_eq!(cfg.mode_bits(), 0o600);
+        assert_eq!(cfg.scrollback_bytes, 2 * 1024 * 1024);
     }
 }

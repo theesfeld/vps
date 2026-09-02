@@ -18,7 +18,7 @@ mod pty;
 mod tty;
 
 use config::DaemonConfig;
-use hub::{new_shared, SharedHub};
+use hub::{new_shared_with_limit, SharedHub};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -70,7 +70,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     match cli.cmd {
         Cmd::Daemon { listen } => {
             let spec = listen.unwrap_or_else(|| cfg.socket_path().display().to_string());
-            daemon(&spec, cfg.shell.clone(), cfg.mode_bits())?
+            daemon(
+                &spec,
+                cfg.shell.clone(),
+                cfg.mode_bits(),
+                cfg.scrollback_bytes,
+            )?
         }
         Cmd::Attach {
             cols,
@@ -91,12 +96,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn daemon(spec: &str, shell: String, mode: u32) -> Result<(), Box<dyn std::error::Error>> {
+fn daemon(
+    spec: &str,
+    shell: String,
+    mode: u32,
+    scrollback_bytes: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     match Listen::parse(spec)? {
         Listen::Stdio => {
             return Err("daemon cannot listen on stdio; use `vpsd attach`".into());
         }
-        Listen::Unix(path) => bind_unix(&path, new_shared(shell), mode)?,
+        Listen::Unix(path) => {
+            bind_unix(&path, new_shared_with_limit(shell, scrollback_bytes), mode)?
+        }
     }
     Ok(())
 }
@@ -183,8 +195,28 @@ fn splice_session(
         })?
         .as_bytes(),
     )?;
+    let replay = hub
+        .lock()
+        .map_err(|e| std::io::Error::other(e.to_string()))?
+        .scrollback(id);
+    if !replay.is_empty() {
+        stream.write_all(&replay)?;
+    }
+    hub.lock()
+        .map_err(|e| std::io::Error::other(e.to_string()))?
+        .winch(id);
     eprintln!("vpsd: session {id} pts {pts}");
-    let end = splice_fds(stream.as_raw_fd(), stream.as_raw_fd(), master.as_raw_fd())?;
+    let hub_out = hub.clone();
+    let end = splice_fds(
+        stream.as_raw_fd(),
+        stream.as_raw_fd(),
+        master.as_raw_fd(),
+        move |bytes| {
+            if let Ok(mut h) = hub_out.lock() {
+                h.push_output(id, bytes);
+            }
+        },
+    )?;
     let mut h = hub
         .lock()
         .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -259,7 +291,12 @@ fn attach_via_daemon(sock: &Path, req: Message) -> Result<(), Box<dyn std::error
         other => return Err(format!("unexpected {other:?}").into()),
     }
     let _raw = tty::RawTty::enter()?;
-    splice_fds(libc::STDIN_FILENO, libc::STDOUT_FILENO, stream.as_raw_fd())?;
+    splice_fds(
+        libc::STDIN_FILENO,
+        libc::STDOUT_FILENO,
+        stream.as_raw_fd(),
+        |_| {},
+    )?;
     Ok(())
 }
 
@@ -277,6 +314,7 @@ fn attach_oneshot(ws: nix::pty::Winsize, shell: &str) -> Result<(), Box<dyn std:
         libc::STDIN_FILENO,
         libc::STDOUT_FILENO,
         session.master.as_raw_fd(),
+        |_| {},
     )?;
     let _ = session.child.kill();
     let _ = session.child.wait();
@@ -312,7 +350,12 @@ enum SpliceEnd {
     MasterGone,
 }
 
-fn splice_fds(stdin_fd: i32, stdout_fd: i32, master_fd: i32) -> std::io::Result<SpliceEnd> {
+fn splice_fds(
+    stdin_fd: i32,
+    stdout_fd: i32,
+    master_fd: i32,
+    mut on_master: impl FnMut(&[u8]),
+) -> std::io::Result<SpliceEnd> {
     unsafe {
         let flags = libc::fcntl(master_fd, libc::F_GETFL);
         libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
@@ -370,8 +413,11 @@ fn splice_fds(stdin_fd: i32, stdout_fd: i32, master_fd: i32) -> std::io::Result<
                     if err.kind() != std::io::ErrorKind::WouldBlock {
                         return Err(err);
                     }
-                } else if libc::write(stdout_fd, buf.as_ptr() as *const _, n as usize) < 0 {
-                    return Err(std::io::Error::last_os_error());
+                } else {
+                    on_master(&buf[..n as usize]);
+                    if libc::write(stdout_fd, buf.as_ptr() as *const _, n as usize) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
                 }
             }
         }
@@ -441,7 +487,7 @@ mod tests {
         let path: PathBuf =
             std::env::temp_dir().join(format!("vpsd-persist-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let hub = new_shared("/bin/bash".into());
+        let hub = new_shared_with_limit("/bin/bash".into(), 64 * 1024);
         let serve_path = path.clone();
         let serve_hub = hub.clone();
         std::thread::spawn(move || {
@@ -496,6 +542,12 @@ mod tests {
             panic!("not hello: {hello2}");
         };
         assert_eq!(id, id2, "should reconnect the same session");
+        let replayed = read_until(&mut b, b"MARK1", Duration::from_secs(3));
+        assert!(
+            replayed.windows(b"MARK1".len()).any(|w| w == b"MARK1"),
+            "reattach must replay prior output, got {:?}",
+            String::from_utf8_lossy(&replayed)
+        );
         b.write_all(b"printf 'GOT=%s\\n' \"$VPSD_PERSIST\"\n")
             .unwrap();
         let got = read_until(&mut b, b"GOT=keep", Duration::from_secs(3));

@@ -12,3 +12,8 @@ shell = "/bin/bash"
 
 # Socket mode as octal digits. 0600 = user rw only.
 socket_mode = "0600"
+
+# Bytes of PTY *output* kept so reattach can replay the screen and
+# recent scrollback. The kernel PTY itself does not store history.
+# Oldest data is dropped at a newline when this cap is exceeded.
+scrollback_bytes = 2097152
