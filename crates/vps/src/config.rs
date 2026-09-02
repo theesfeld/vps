@@ -58,12 +58,14 @@ pub struct Window {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct FontCfg {
-    /// fontconfig family. Empty → iced built-in monospace.
+    /// fontconfig family. Empty → fontconfig `monospace` (kitty's default stack).
     pub family: String,
-    /// Glyph size in pixels (iced `Pixels`).
+    /// Glyph size in pixels (iced `Pixels`). kitty IRONGALL is 14.
     pub size: f32,
     /// Line height as a multiple of `size`.
     pub scale: f32,
+    /// Extra fontconfig families to load (nerd/symbol glyphs).
+    pub extras: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -139,9 +141,10 @@ impl Default for Window {
 impl Default for FontCfg {
     fn default() -> Self {
         Self {
-            family: "Berkeley Mono".into(),
-            size: 18.0,
+            family: String::new(),
+            size: 14.0,
             scale: 1.3,
+            extras: vec!["MesloLGS Nerd Font".into()],
         }
     }
 }
@@ -229,11 +232,7 @@ impl Config {
     }
 
     pub fn iced_font(&self) -> Font {
-        if self.font.family.trim().is_empty() {
-            Font::MONOSPACE
-        } else {
-            Font::with_name(Box::leak(self.font.family.clone().into_boxed_str()))
-        }
+        Font::with_name(crate::fonts::load(&self.font).family)
     }
 
     pub fn term_env(&self) -> HashMap<String, String> {
