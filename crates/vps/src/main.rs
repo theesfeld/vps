@@ -1,6 +1,7 @@
 //! Native window. Lists grok PTYs, then `ssh -tt` attaches to one.
 
 mod config;
+mod fonts;
 
 use std::process::Command;
 
@@ -390,9 +391,14 @@ fn main() -> iced::Result {
         ..Default::default()
     };
 
-    iced::application(App::new, App::update, App::view)
+    let loaded = fonts::load(&cfg.font);
+    let mut app = iced::application(App::new, App::update, App::view)
         .title(App::title)
         .window(window)
-        .subscription(App::subscription)
-        .run()
+        .default_font(iced::Font::with_name(loaded.family))
+        .subscription(App::subscription);
+    for face in &loaded.faces {
+        app = app.font(*face);
+    }
+    app.run()
 }

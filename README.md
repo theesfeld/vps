@@ -167,14 +167,17 @@ Shipped copies are **the defaults**, commented. Every modifiable knob is a key. 
 | `[picker]` | `mode` | `"when_sessions"` | `when_sessions` / `always` / `never` |
 | `[window]` | `width` / `height` | `1280.0` / `800.0` | Initial size (pixels) |
 | `[window]` | `app_id` | `"vps"` | Wayland app id |
-| `[font]` | `family` | `"Berkeley Mono"` | fontconfig family; empty = iced monospace |
-| `[font]` | `size` | `18.0` | Glyph size in **pixels** |
+| `[font]` | `family` | `""` | fontconfig family; empty = `monospace` (kitty's default; Berkeley Mono here) |
+| `[font]` | `size` | `14.0` | Glyph size in **pixels** (kitty IRONGALL is 14) |
 | `[font]` | `scale` | `1.3` | Line height × `size` |
+| `[font]` | `extras` | `["MesloLGS Nerd Font"]` | Extra families loaded for nerd/symbol glyphs |
 | `[term]` | `term` | `"xterm-256color"` | `$TERM` |
 | `[term]` | `colorterm` | `"truecolor"` | `$COLORTERM` |
 | `[colors]` | `background` | `"#241018"` | Red-shifted Irongall ground |
 | `[colors]` | `foreground`, `black`…`white`, `bright_*`, `dim_*` | (see file) | Full 16-colour + dim set |
 | `[colors]` | `bright_foreground` | unset | Optional override |
+
+iced does not talk to fontconfig. `vps` runs `fc-match` (the same database kitty uses), reads the TTF/OTF files, and registers them with iced. Empty `family` is fontconfig `monospace`.
 
 `ssh.remote` must stay a **single** string. OpenSSH concatenates extra argv with spaces and passes the result to `$SHELL -c`. Splitting `vpsd` and `attach` makes bash treat `attach` as a leftover argument; you get `vpsd` help and the window dies.
 
