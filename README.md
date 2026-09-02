@@ -135,7 +135,7 @@ Replace a running binary: `systemctl --user stop vpsd` first (ETXTBSY otherwise)
 | Super+Shift+Return again | Picker: **idle** sessions you can reconnect, **live** ones already in another window, **+ new session**. |
 | Enter on an idle row | `vpsd attach --id N` — same shell, **replayed scrollback**, then live |
 | `n` or **+ new session** | `vpsd attach --new` |
-| Enter on a **live** row | refused (that PTY is already on screen) |
+| Enter on a **live** row | takes over that PTY (other window, if any, detaches) |
 | `ssh grok` | unchanged: zellij `grok-build` |
 
 Picker keys: `↑↓` / `j k`, `enter`, `n` new, `s` settings, `esc` quit.
