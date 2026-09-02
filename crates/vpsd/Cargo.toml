@@ -8,6 +8,7 @@ rust-version.workspace = true
 description = "Remote PTY daemon: Unix socket / stdio only"
 
 [dependencies]
+alacritty_terminal = "0.25.1"
 clap.workspace = true
 libc.workspace = true
 nix.workspace = true
