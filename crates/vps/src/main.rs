@@ -2,9 +2,11 @@
 
 mod config;
 mod fonts;
+mod settings;
 
 use std::process::Command;
 
+use clap::{Parser, Subcommand};
 use iced::keyboard::key::Named;
 use iced::keyboard::Key;
 use iced::widget::{column, container, text, Space};
@@ -30,6 +32,11 @@ enum Mode {
     Term {
         term: Box<Terminal>,
     },
+    Settings {
+        form: Box<settings::Form>,
+        /// `None` means this process was `vps settings` — cancel closes.
+        back: Option<(Vec<SessionInfo>, usize)>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -37,12 +44,39 @@ enum Event {
     Listed(Result<Vec<SessionInfo>, String>),
     Key(Key),
     Terminal(iced_term::Event),
+    Settings(settings::Msg),
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "vps", about = "Native window onto a grok PTY")]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Edit ~/.config/vps/config.toml
+    Settings,
 }
 
 impl App {
-    fn new() -> (Self, Task<Event>) {
+    fn boot(open_settings: bool) -> (Self, Task<Event>) {
         let cfg = Config::load();
         let host = cfg.ssh.host.clone();
+        if open_settings {
+            return (
+                Self {
+                    title: format!("vps · {host} · settings"),
+                    cfg: cfg.clone(),
+                    mode: Mode::Settings {
+                        form: Box::new(settings::Form::from_cfg(&cfg)),
+                        back: None,
+                    },
+                },
+                Task::none(),
+            );
+        }
         (
             Self {
                 title: format!("vps · {host}"),
@@ -80,6 +114,7 @@ impl App {
                 Task::none()
             }
             Event::Key(key) => self.handle_pick_key(key),
+            Event::Settings(msg) => self.handle_settings(msg),
             Event::Terminal(iced_term::Event::BackendCall(_, cmd)) => {
                 if let Mode::Term { term } = &mut self.mode {
                     match term.handle(iced_term::Command::ProxyToBackend(cmd)) {
@@ -106,7 +141,7 @@ impl App {
         else {
             return Task::none();
         };
-        let n = sessions.len() + 1; // last row is New
+        let n = sessions.len() + 2; // new, then settings
         match &key {
             Key::Named(Named::Escape) => window::latest().and_then(window::close),
             Key::Named(Named::ArrowUp) => {
@@ -126,9 +161,12 @@ impl App {
                 Task::none()
             }
             Key::Character(c) if c.as_str() == "n" => self.enter_term(AttachSpec::New),
+            Key::Character(c) if c.as_str() == "s" => self.enter_settings(),
             Key::Named(Named::Enter) => {
-                if *cursor >= sessions.len() {
+                if *cursor == sessions.len() {
                     self.enter_term(AttachSpec::New)
+                } else if *cursor > sessions.len() {
+                    self.enter_settings()
                 } else {
                     let s = sessions[*cursor].clone();
                     if s.attached {
@@ -182,6 +220,73 @@ impl App {
         Task::batch([focus, window::latest().and_then(window::gain_focus)])
     }
 
+    fn enter_settings(&mut self) -> Task<Event> {
+        let back = match &self.mode {
+            Mode::Pick {
+                sessions, cursor, ..
+            } => Some((sessions.clone(), *cursor)),
+            _ => None,
+        };
+        self.title = format!("vps · {} · settings", self.cfg.ssh.host);
+        self.mode = Mode::Settings {
+            form: Box::new(settings::Form::from_cfg(&self.cfg)),
+            back,
+        };
+        Task::none()
+    }
+
+    fn handle_settings(&mut self, msg: settings::Msg) -> Task<Event> {
+        match msg {
+            settings::Msg::Save => {
+                let Mode::Settings { form, .. } = &self.mode else {
+                    return Task::none();
+                };
+                match form.apply() {
+                    Ok(cfg) => match cfg.save() {
+                        Ok(path) => {
+                            self.cfg = cfg;
+                            if let Mode::Settings { form, .. } = &mut self.mode {
+                                form.status = Some(format!("saved {path}", path = path.display()));
+                            }
+                        }
+                        Err(e) => {
+                            if let Mode::Settings { form, .. } = &mut self.mode {
+                                form.status = Some(e);
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        if let Mode::Settings { form, .. } = &mut self.mode {
+                            form.status = Some(e);
+                        }
+                    }
+                }
+                Task::none()
+            }
+            settings::Msg::Cancel => match &self.mode {
+                Mode::Settings {
+                    back: Some((sessions, cursor)),
+                    ..
+                } => {
+                    self.title = format!("vps · {}", self.cfg.ssh.host);
+                    self.mode = Mode::Pick {
+                        sessions: sessions.clone(),
+                        cursor: *cursor,
+                        err: None,
+                    };
+                    Task::none()
+                }
+                _ => window::latest().and_then(window::close),
+            },
+            other => {
+                if let Mode::Settings { form, .. } = &mut self.mode {
+                    form.update(other);
+                }
+                Task::none()
+            }
+        }
+    }
+
     fn view(&self) -> Element<'_, Event> {
         match &self.mode {
             Mode::Loading => container(text("listing sessions…").color(fg(&self.cfg)))
@@ -201,6 +306,7 @@ impl App {
                     .height(Length::Fill)
                     .into()
             }
+            Mode::Settings { form, .. } => settings::view(&self.cfg, form).map(Event::Settings),
         }
     }
 
@@ -210,6 +316,17 @@ impl App {
             Mode::Pick { .. } => event::listen_with(|ev, _status, _id| {
                 if let iced::Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) = ev {
                     Some(Event::Key(key))
+                } else {
+                    None
+                }
+            }),
+            Mode::Settings { .. } => event::listen_with(|ev, _status, _id| {
+                if let iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: Key::Named(Named::Escape),
+                    ..
+                }) = ev
+                {
+                    Some(Event::Settings(settings::Msg::Cancel))
                 } else {
                     None
                 }
@@ -239,13 +356,14 @@ fn pick_view<'a>(
         rows = rows.push(session_row(cfg, s, i == cursor));
     }
     rows = rows.push(session_row_new(cfg, cursor == sessions.len()));
+    rows = rows.push(session_row_settings(cfg, cursor == sessions.len() + 1));
     if let Some(err) = err {
         rows = rows.push(Space::new().height(8));
         rows = rows.push(text(err).size(14).color(parse_hex(&cfg.colors.red)));
     }
     rows = rows.push(Space::new().height(16));
     rows = rows.push(
-        text("↑↓ / j k    enter    n new    esc")
+        text("↑↓ / j k    enter    n new    s settings    esc")
             .size(13)
             .color(dim(cfg)),
     );
@@ -294,6 +412,30 @@ fn session_row(cfg: &Config, s: &SessionInfo, selected: bool) -> Element<'static
         .into()
 }
 
+fn session_row_settings(cfg: &Config, selected: bool) -> Element<'static, Event> {
+    let fg = if selected {
+        parse_hex(&cfg.colors.foreground)
+    } else {
+        dim(cfg)
+    };
+    let sel_bg = parse_hex(&cfg.colors.bright_black);
+    let t = text("     settings").size(16).color(fg);
+    container(t)
+        .width(Length::Fill)
+        .padding(6)
+        .style(move |_| {
+            if selected {
+                iced::widget::container::Style {
+                    background: Some(iced::Background::Color(sel_bg)),
+                    ..Default::default()
+                }
+            } else {
+                iced::widget::container::Style::default()
+            }
+        })
+        .into()
+}
+
 fn session_row_new(cfg: &Config, selected: bool) -> Element<'static, Event> {
     let fg = if selected {
         parse_hex(&cfg.colors.foreground)
@@ -318,7 +460,7 @@ fn session_row_new(cfg: &Config, selected: bool) -> Element<'static, Event> {
         .into()
 }
 
-fn pane_style(cfg: &Config) -> iced::widget::container::Style {
+pub(crate) fn pane_style(cfg: &Config) -> iced::widget::container::Style {
     iced::widget::container::Style {
         background: Some(iced::Background::Color(parse_hex(&cfg.colors.background))),
         text_color: Some(parse_hex(&cfg.colors.foreground)),
@@ -326,15 +468,15 @@ fn pane_style(cfg: &Config) -> iced::widget::container::Style {
     }
 }
 
-fn fg(cfg: &Config) -> Color {
+pub(crate) fn fg(cfg: &Config) -> Color {
     parse_hex(&cfg.colors.foreground)
 }
 
-fn dim(cfg: &Config) -> Color {
+pub(crate) fn dim(cfg: &Config) -> Color {
     parse_hex(&cfg.colors.dim_foreground)
 }
 
-fn parse_hex(s: &str) -> Color {
+pub(crate) fn parse_hex(s: &str) -> Color {
     let s = s.trim().trim_start_matches('#');
     if s.len() != 6 {
         return Color::WHITE;
@@ -381,6 +523,8 @@ fn list_sessions(cfg: &Config) -> Result<Vec<SessionInfo>, String> {
 }
 
 fn main() -> iced::Result {
+    let cli = Cli::parse();
+    let open_settings = matches!(cli.cmd, Some(Cmd::Settings));
     let cfg = Config::load();
     let window = window::Settings {
         size: Size::new(cfg.window.width, cfg.window.height),
@@ -392,7 +536,7 @@ fn main() -> iced::Result {
     };
 
     let loaded = fonts::load(&cfg.font);
-    let mut app = iced::application(App::new, App::update, App::view)
+    let mut app = iced::application(move || App::boot(open_settings), App::update, App::view)
         .title(App::title)
         .window(window)
         .default_font(iced::Font::with_name(loaded.family))

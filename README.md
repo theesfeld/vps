@@ -138,7 +138,24 @@ Replace a running binary: `systemctl --user stop vpsd` first (ETXTBSY otherwise)
 | Enter on a **live** row | refused (that PTY is already on screen) |
 | `ssh grok` | unchanged: zellij `grok-build` |
 
-Picker keys: `↑↓` / `j k`, `enter`, `n` new, `esc` quit.
+Picker keys: `↑↓` / `j k`, `enter`, `n` new, `s` settings, `esc` quit.
+
+### Settings
+
+| How | What |
+| --- | --- |
+| Super+Shift+Return, then `s` (or the **settings** row) | Settings screen in the same window |
+| `vps settings` | Settings only (from any terminal) |
+| Save | Writes `~/.config/vps/config.toml` |
+| Cancel / `esc` | Back to the picker, or quit if you launched `vps settings` |
+
+Font **family** is loaded at process start (`fc-match`). After changing it, quit and open `vps` again. Size/colors/ssh apply on the next attach in this process after save.
+
+Optional niri bind:
+
+```kdl
+Super+Shift+Comma repeat=false { spawn "vps" "settings"; }
+```
 
 There is no auto-grab of “the first idle PTY.” You choose.
 
