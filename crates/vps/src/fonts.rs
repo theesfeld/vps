@@ -1,4 +1,4 @@
-//! Load the fontconfig monospace (kitty's stack) into iced.
+//! Load the fontconfig monospace into iced (the picker, not the TTY).
 //!
 //! iced does not read fontconfig by itself. `Font::with_name` is only a label;
 //! the TTF/OTF bytes have to be registered with `.font(...)`.

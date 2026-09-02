@@ -25,6 +25,19 @@ list = "/home/tj/.local/bin/vpsd list"
 # never — skip the menu, always --new
 mode = "when_sessions"
 
+[terminal]
+# Session window. iced is the picker only — it cannot host Grok (alt-screen
+# flood). Empty program → first-run chooser of known terminals on PATH
+# (kitty, foot, alacritty, ghostty, wezterm). Enter writes this file.
+# If the saved binary is deleted or no longer executable, the chooser
+# comes back with a reason. Switch later: picker `t`, or this field /
+# `vps settings`.
+# A path or a basename. Extra args sit after the emulator's own flags
+# and before `ssh`. Unknown binaries: `{program} {args…} ssh …`
+# (put `-e` in args if that emulator needs it).
+program = ""
+args = []
+
 [window]
 # Initial size in physical pixels. niri may still tile/stretch the window.
 width = 1280.0

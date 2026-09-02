@@ -1,8 +1,9 @@
-//! Native window. Lists grok PTYs, then `ssh -tt` attaches to one.
+//! Native window. Lists grok PTYs, then a real terminal attaches over ssh.
 
 mod config;
 mod fonts;
 mod settings;
+mod terminal;
 
 use std::process::Command;
 
@@ -11,32 +12,49 @@ use iced::keyboard::key::Named;
 use iced::keyboard::Key;
 use iced::widget::{column, container, text, Space};
 use iced::{event, keyboard, window, Color, Element, Length, Size, Subscription, Task};
-use iced_term::Terminal;
 use vps_protocol::{decode_line, Message, SessionInfo};
 
 use config::{AttachSpec, Config};
+use terminal::Detected;
 
 struct App {
     cfg: Config,
     title: String,
     mode: Mode,
-    pending_err: Option<String>,
 }
 
 enum Mode {
     Loading,
+    ChooseTerm {
+        found: Vec<Detected>,
+        cursor: usize,
+        err: Option<String>,
+        /// First run (empty program). After pick, list/spawn instead of returning.
+        first: bool,
+        back: Option<(Vec<SessionInfo>, usize)>,
+    },
     Pick {
         sessions: Vec<SessionInfo>,
         cursor: usize,
         err: Option<String>,
     },
-    Term {
-        term: Box<Terminal>,
-    },
     Settings {
         form: Box<settings::Form>,
-        /// `None` means this process was `vps settings` — cancel closes.
-        back: Option<(Vec<SessionInfo>, usize)>,
+        back: Back,
+    },
+}
+
+enum Back {
+    Quit,
+    Pick {
+        sessions: Vec<SessionInfo>,
+        cursor: usize,
+    },
+    Choose {
+        found: Vec<Detected>,
+        cursor: usize,
+        first: bool,
+        pick: Option<(Vec<SessionInfo>, usize)>,
     },
 }
 
@@ -44,7 +62,6 @@ enum Mode {
 enum Event {
     Listed(Result<Vec<SessionInfo>, String>),
     Key(Key),
-    Terminal(iced_term::Event),
     Settings(settings::Msg),
 }
 
@@ -59,6 +76,15 @@ struct Cli {
 enum Cmd {
     /// Edit ~/.config/vps/config.toml
     Settings,
+    /// Exec the chosen terminal onto a grok PTY (used by the picker via niri spawn).
+    Attach {
+        /// Reconnect to this session id.
+        #[arg(long)]
+        id: Option<u64>,
+        /// Always create a new PTY.
+        #[arg(long)]
+        new: bool,
+    },
 }
 
 impl App {
@@ -70,9 +96,24 @@ impl App {
                 Self {
                     title: format!("vps · {host} · settings"),
                     cfg: cfg.clone(),
-                    pending_err: None,
                     mode: Mode::Settings {
                         form: Box::new(settings::Form::from_cfg(&cfg)),
+                        back: Back::Quit,
+                    },
+                },
+                Task::none(),
+            );
+        }
+        if terminal::needs_chooser(&cfg) {
+            return (
+                Self {
+                    title: format!("vps · {host} · terminal"),
+                    cfg: cfg.clone(),
+                    mode: Mode::ChooseTerm {
+                        found: terminal::detect(),
+                        cursor: 0,
+                        err: terminal::missing_terminal_message(&cfg),
+                        first: true,
                         back: None,
                     },
                 },
@@ -83,7 +124,6 @@ impl App {
             Self {
                 title: format!("vps · {host}"),
                 cfg: cfg.clone(),
-                pending_err: None,
                 mode: Mode::Loading,
             },
             Task::perform(async move { list_sessions(&cfg) }, Event::Listed),
@@ -97,12 +137,11 @@ impl App {
     fn update(&mut self, event: Event) -> Task<Event> {
         match event {
             Event::Listed(Ok(sessions)) => {
-                let err = self.pending_err.take();
-                if self.cfg.want_picker(sessions.len()) || err.is_some() {
+                if self.cfg.want_picker(sessions.len()) {
                     self.mode = Mode::Pick {
                         sessions,
                         cursor: 0,
-                        err,
+                        err: None,
                     };
                     Task::none()
                 } else {
@@ -117,32 +156,12 @@ impl App {
                 };
                 Task::none()
             }
-            Event::Key(key) => self.handle_pick_key(key),
+            Event::Key(key) => match &self.mode {
+                Mode::ChooseTerm { .. } => self.handle_choose_key(key),
+                Mode::Pick { .. } => self.handle_pick_key(key),
+                _ => Task::none(),
+            },
             Event::Settings(msg) => self.handle_settings(msg),
-            Event::Terminal(iced_term::Event::BackendCall(_, cmd)) => {
-                if let Mode::Term { term } = &mut self.mode {
-                    match term.handle(iced_term::Command::ProxyToBackend(cmd)) {
-                        iced_term::actions::Action::Shutdown => {
-                            self.pending_err = Some(
-                                "attach ended — pick the session again (Grok was still drawing)"
-                                    .into(),
-                            );
-                            self.title = format!("vps · {}", self.cfg.ssh.host);
-                            self.mode = Mode::Loading;
-                            let cfg = self.cfg.clone();
-                            return Task::perform(
-                                async move { list_sessions(&cfg) },
-                                Event::Listed,
-                            );
-                        }
-                        iced_term::actions::Action::ChangeTitle(title) => {
-                            self.title = title;
-                        }
-                        _ => {}
-                    }
-                }
-                Task::none()
-            }
         }
     }
 
@@ -176,6 +195,7 @@ impl App {
             }
             Key::Character(c) if c.as_str() == "n" => self.enter_term(AttachSpec::New),
             Key::Character(c) if c.as_str() == "s" => self.enter_settings(),
+            Key::Character(c) if c.as_str() == "t" => self.enter_chooser(false),
             Key::Named(Named::Enter) => {
                 if *cursor == sessions.len() {
                     self.enter_term(AttachSpec::New)
@@ -190,49 +210,197 @@ impl App {
         }
     }
 
-    fn enter_term(&mut self, spec: AttachSpec) -> Task<Event> {
-        let settings = iced_term::settings::Settings {
-            font: iced_term::settings::FontSettings {
-                size: self.cfg.font.size,
-                scale_factor: self.cfg.font.scale,
-                font_type: self.cfg.iced_font(),
-            },
-            theme: iced_term::settings::ThemeSettings::new(Box::new(self.cfg.palette())),
-            backend: iced_term::settings::BackendSettings {
-                program: "ssh".into(),
-                args: self.cfg.ssh_attach_argv(spec),
-                env: self.cfg.term_env(),
-                working_directory: None,
-            },
+    fn handle_choose_key(&mut self, key: Key) -> Task<Event> {
+        let (n, first, back) = match &self.mode {
+            Mode::ChooseTerm {
+                found, first, back, ..
+            } => (found.len() + 1, *first, back.clone()),
+            _ => return Task::none(),
         };
-        let term = match Terminal::new(0, settings) {
-            Ok(t) => t,
-            Err(e) => {
-                self.mode = Mode::Pick {
-                    sessions: Vec::new(),
-                    cursor: 0,
-                    err: Some(e.to_string()),
-                };
-                return Task::none();
+        match &key {
+            Key::Named(Named::Escape) => {
+                if first {
+                    window::latest().and_then(window::close)
+                } else if let Some((sessions, cur)) = back {
+                    self.title = format!("vps · {}", self.cfg.ssh.host);
+                    self.mode = Mode::Pick {
+                        sessions,
+                        cursor: cur,
+                        err: None,
+                    };
+                    Task::none()
+                } else {
+                    window::latest().and_then(window::close)
+                }
             }
+            Key::Named(Named::ArrowUp) => {
+                if let Mode::ChooseTerm { cursor, .. } = &mut self.mode {
+                    *cursor = cursor.checked_sub(1).unwrap_or(n.saturating_sub(1));
+                }
+                Task::none()
+            }
+            Key::Named(Named::ArrowDown) => {
+                if let Mode::ChooseTerm { cursor, .. } = &mut self.mode {
+                    *cursor = (*cursor + 1) % n.max(1);
+                }
+                Task::none()
+            }
+            Key::Character(c) if c.as_str() == "k" => {
+                if let Mode::ChooseTerm { cursor, .. } = &mut self.mode {
+                    *cursor = cursor.checked_sub(1).unwrap_or(n.saturating_sub(1));
+                }
+                Task::none()
+            }
+            Key::Character(c) if c.as_str() == "j" => {
+                if let Mode::ChooseTerm { cursor, .. } = &mut self.mode {
+                    *cursor = (*cursor + 1) % n.max(1);
+                }
+                Task::none()
+            }
+            Key::Character(c) if c.as_str() == "s" => self.enter_settings(),
+            Key::Named(Named::Enter) => {
+                let picked = match &self.mode {
+                    Mode::ChooseTerm {
+                        found,
+                        cursor,
+                        first,
+                        back,
+                        ..
+                    } if *cursor < found.len() => Some((
+                        found[*cursor].path.display().to_string(),
+                        *first,
+                        back.clone(),
+                    )),
+                    Mode::ChooseTerm { .. } => None,
+                    _ => return Task::none(),
+                };
+                match picked {
+                    Some((program, first, back)) => self.apply_terminal(program, first, back),
+                    None => self.enter_settings(),
+                }
+            }
+            _ => Task::none(),
+        }
+    }
+
+    fn apply_terminal(
+        &mut self,
+        program: String,
+        first: bool,
+        back: Option<(Vec<SessionInfo>, usize)>,
+    ) -> Task<Event> {
+        self.cfg.terminal.program = program;
+        match self.cfg.save() {
+            Ok(path) => {
+                if first {
+                    self.title = format!("vps · {}", self.cfg.ssh.host);
+                    self.mode = Mode::Loading;
+                    let cfg = self.cfg.clone();
+                    Task::perform(async move { list_sessions(&cfg) }, Event::Listed)
+                } else {
+                    self.title = format!("vps · {}", self.cfg.ssh.host);
+                    self.mode = Mode::Pick {
+                        sessions: back.as_ref().map(|b| b.0.clone()).unwrap_or_default(),
+                        cursor: back.as_ref().map(|b| b.1).unwrap_or(0),
+                        err: Some(format!("terminal saved ({})", path.display())),
+                    };
+                    Task::none()
+                }
+            }
+            Err(e) => {
+                if let Mode::ChooseTerm { err, .. } = &mut self.mode {
+                    *err = Some(e);
+                }
+                Task::none()
+            }
+        }
+    }
+
+    fn enter_term(&mut self, spec: AttachSpec) -> Task<Event> {
+        if terminal::needs_chooser(&self.cfg) {
+            let first = !matches!(self.mode, Mode::Pick { .. });
+            return self.enter_chooser(first);
+        }
+        match terminal::spawn_session(&self.cfg, spec) {
+            Ok(()) => window::latest().and_then(window::close),
+            Err(e) => {
+                if terminal::needs_chooser(&self.cfg) {
+                    let first = !matches!(self.mode, Mode::Pick { .. });
+                    return self.enter_chooser(first);
+                }
+                match &mut self.mode {
+                    Mode::Pick { err, .. } => *err = Some(e),
+                    _ => {
+                        self.mode = Mode::Pick {
+                            sessions: Vec::new(),
+                            cursor: 0,
+                            err: Some(e),
+                        };
+                    }
+                }
+                Task::none()
+            }
+        }
+    }
+
+    fn enter_chooser(&mut self, first: bool) -> Task<Event> {
+        let back = match &self.mode {
+            Mode::Pick {
+                sessions, cursor, ..
+            } => Some((sessions.clone(), *cursor)),
+            Mode::ChooseTerm { back, .. } => back.clone(),
+            _ => None,
         };
-        let focus = iced_term::TerminalView::focus(term.widget_id().clone());
-        self.title = match spec {
-            AttachSpec::New => format!("vps · {}", self.cfg.ssh.host),
-            AttachSpec::Id(id) => format!("vps · {} · #{id}", self.cfg.ssh.host),
+        self.title = format!("vps · {} · terminal", self.cfg.ssh.host);
+        self.mode = Mode::ChooseTerm {
+            found: terminal::detect(),
+            cursor: 0,
+            err: terminal::missing_terminal_message(&self.cfg),
+            first,
+            back,
         };
-        self.mode = Mode::Term {
-            term: Box::new(term),
-        };
-        Task::batch([focus, window::latest().and_then(window::gain_focus)])
+        Task::none()
     }
 
     fn enter_settings(&mut self) -> Task<Event> {
         let back = match &self.mode {
             Mode::Pick {
                 sessions, cursor, ..
-            } => Some((sessions.clone(), *cursor)),
-            _ => None,
+            } => Back::Pick {
+                sessions: sessions.clone(),
+                cursor: *cursor,
+            },
+            Mode::ChooseTerm {
+                found,
+                cursor,
+                first,
+                back,
+                ..
+            } => Back::Choose {
+                found: found.clone(),
+                cursor: *cursor,
+                first: *first,
+                pick: back.clone(),
+            },
+            Mode::Settings { back, .. } => match back {
+                Back::Quit => Back::Quit,
+                Back::Pick { sessions, cursor } => Back::Pick {
+                    sessions: sessions.clone(),
+                    cursor: *cursor,
+                },
+                Back::Choose {
+                    found,
+                    cursor,
+                    first,
+                    pick,
+                } => Back::Choose {
+                    found: found.clone(),
+                    cursor: *cursor,
+                    first: *first,
+                    pick: pick.clone(),
+                },
+            },
+            Mode::Loading => Back::Quit,
         };
         self.title = format!("vps · {} · settings", self.cfg.ssh.host);
         self.mode = Mode::Settings {
@@ -272,7 +440,10 @@ impl App {
             }
             settings::Msg::Cancel => match &self.mode {
                 Mode::Settings {
-                    back: Some((sessions, cursor)),
+                    back:
+                        Back::Pick {
+                            sessions, cursor, ..
+                        },
                     ..
                 } => {
                     self.title = format!("vps · {}", self.cfg.ssh.host);
@@ -280,6 +451,26 @@ impl App {
                         sessions: sessions.clone(),
                         cursor: *cursor,
                         err: None,
+                    };
+                    Task::none()
+                }
+                Mode::Settings {
+                    back:
+                        Back::Choose {
+                            found,
+                            cursor,
+                            first,
+                            pick,
+                        },
+                    ..
+                } => {
+                    self.title = format!("vps · {} · terminal", self.cfg.ssh.host);
+                    self.mode = Mode::ChooseTerm {
+                        found: found.clone(),
+                        cursor: *cursor,
+                        err: None,
+                        first: *first,
+                        back: pick.clone(),
                     };
                     Task::none()
                 }
@@ -302,31 +493,29 @@ impl App {
                 .padding(24)
                 .style(|_| pane_style(&self.cfg))
                 .into(),
+            Mode::ChooseTerm {
+                found, cursor, err, ..
+            } => choose_view(&self.cfg, found, *cursor, err.as_deref()),
             Mode::Pick {
                 sessions,
                 cursor,
                 err,
             } => pick_view(&self.cfg, sessions, *cursor, err.as_deref()),
-            Mode::Term { term } => {
-                container(iced_term::TerminalView::show(term).map(Event::Terminal))
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into()
-            }
             Mode::Settings { form, .. } => settings::view(&self.cfg, form).map(Event::Settings),
         }
     }
 
     fn subscription(&self) -> Subscription<Event> {
         match &self.mode {
-            Mode::Term { term } => term.subscription().map(Event::Terminal),
-            Mode::Pick { .. } => event::listen_with(|ev, _status, _id| {
-                if let iced::Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) = ev {
-                    Some(Event::Key(key))
-                } else {
-                    None
-                }
-            }),
+            Mode::Pick { .. } | Mode::ChooseTerm { .. } => {
+                event::listen_with(|ev, _status, _id| {
+                    if let iced::Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) = ev {
+                        Some(Event::Key(key))
+                    } else {
+                        None
+                    }
+                })
+            }
             Mode::Settings { .. } => event::listen_with(|ev, _status, _id| {
                 if let iced::Event::Keyboard(keyboard::Event::KeyPressed {
                     key: Key::Named(Named::Escape),
@@ -370,7 +559,62 @@ fn pick_view<'a>(
     }
     rows = rows.push(Space::new().height(16));
     rows = rows.push(
-        text("↑↓ / j k    enter    n new    s settings    esc")
+        text("↑↓ / j k    enter    n new    t terminal    s settings    esc")
+            .size(13)
+            .color(dim(cfg)),
+    );
+
+    container(rows)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(24)
+        .style(move |_| pane_style(cfg))
+        .into()
+}
+
+fn choose_view<'a>(
+    cfg: &'a Config,
+    found: &'a [Detected],
+    cursor: usize,
+    err: Option<&'a str>,
+) -> Element<'a, Event> {
+    let fg = fg(cfg);
+    let mut rows = column![
+        text(format!("vps · {}", cfg.ssh.host)).size(22).color(fg),
+        text("choose a terminal — saved to ~/.config/vps/config.toml")
+            .size(14)
+            .color(dim(cfg)),
+        Space::new().height(12),
+    ]
+    .spacing(4);
+
+    if found.is_empty() {
+        rows = rows.push(
+            text("no known terminal on PATH (kitty, foot, alacritty, ghostty, wezterm)")
+                .size(14)
+                .color(parse_hex(&cfg.colors.red)),
+        );
+        rows = rows.push(Space::new().height(8));
+    }
+    for (i, d) in found.iter().enumerate() {
+        rows = rows.push(choice_row(
+            cfg,
+            &format!("  {:<12} {}", d.name, d.path.display()),
+            i == cursor,
+        ));
+    }
+    rows = rows.push(choice_row(
+        cfg,
+        "     type a path in settings",
+        cursor == found.len(),
+    ));
+    if let Some(err) = err {
+        rows = rows.push(Space::new().height(8));
+        rows = rows.push(text(err).size(14).color(parse_hex(&cfg.colors.red)));
+    }
+    rows = rows.push(Space::new().height(16));
+    rows = rows.push(
+        text("↑↓ / j k    enter    s settings    esc")
             .size(13)
             .color(dim(cfg)),
     );
@@ -385,9 +629,21 @@ fn pick_view<'a>(
 
 fn session_row(cfg: &Config, s: &SessionInfo, selected: bool) -> Element<'static, Event> {
     let state = if s.attached { "live" } else { "idle" };
-    let cmd = if s.command.is_empty() {
-        "bash".into()
-    } else if !s.title.is_empty() {
+    let cmd = session_command_label(s);
+    let cwd = if s.cwd.is_empty() {
+        String::new()
+    } else {
+        truncate(&s.cwd, 40)
+    };
+    let line = format!("#{:<3} {state:<5}  {cwd}  {cmd}", s.id);
+    choice_row(cfg, &line, selected)
+}
+
+fn session_command_label(s: &SessionInfo) -> String {
+    if s.command.is_empty() {
+        return "bash".into();
+    }
+    if !s.title.is_empty() {
         let base = s
             .command
             .split_whitespace()
@@ -396,71 +652,27 @@ fn session_row(cfg: &Config, s: &SessionInfo, selected: bool) -> Element<'static
             .rsplit('/')
             .next()
             .unwrap_or("grok");
-        truncate(&format!("{base} [{}]", s.title), 56)
-    } else {
-        truncate(&s.command, 48)
-    };
-    let cwd = if s.cwd.is_empty() {
-        String::new()
-    } else {
-        truncate(&s.cwd, 40)
-    };
-    let line = format!("#{:<3} {state:<5}  {cwd}  {cmd}", s.id);
-    let fg = if selected {
-        parse_hex(&cfg.colors.foreground)
-    } else {
-        dim(cfg)
-    };
-    let sel_bg = parse_hex(&cfg.colors.bright_black);
-    let t = text(line).size(16).color(fg);
-    container(t)
-        .width(Length::Fill)
-        .padding(6)
-        .style(move |_| {
-            if selected {
-                iced::widget::container::Style {
-                    background: Some(iced::Background::Color(sel_bg)),
-                    ..Default::default()
-                }
-            } else {
-                iced::widget::container::Style::default()
-            }
-        })
-        .into()
+        return truncate(&format!("{base} [{}]", s.title), 56);
+    }
+    truncate(&s.command, 48)
 }
 
 fn session_row_settings(cfg: &Config, selected: bool) -> Element<'static, Event> {
-    let fg = if selected {
-        parse_hex(&cfg.colors.foreground)
-    } else {
-        dim(cfg)
-    };
-    let sel_bg = parse_hex(&cfg.colors.bright_black);
-    let t = text("     settings").size(16).color(fg);
-    container(t)
-        .width(Length::Fill)
-        .padding(6)
-        .style(move |_| {
-            if selected {
-                iced::widget::container::Style {
-                    background: Some(iced::Background::Color(sel_bg)),
-                    ..Default::default()
-                }
-            } else {
-                iced::widget::container::Style::default()
-            }
-        })
-        .into()
+    choice_row(cfg, "     settings", selected)
 }
 
 fn session_row_new(cfg: &Config, selected: bool) -> Element<'static, Event> {
+    choice_row(cfg, "+    new session", selected)
+}
+
+fn choice_row(cfg: &Config, line: &str, selected: bool) -> Element<'static, Event> {
     let fg = if selected {
         parse_hex(&cfg.colors.foreground)
     } else {
         dim(cfg)
     };
     let sel_bg = parse_hex(&cfg.colors.bright_black);
-    let t = text("+    new session").size(16).color(fg);
+    let t = text(line.to_string()).size(16).color(fg);
     container(t)
         .width(Length::Fill)
         .padding(6)
@@ -541,6 +753,9 @@ fn list_sessions(cfg: &Config) -> Result<Vec<SessionInfo>, String> {
 
 fn main() -> iced::Result {
     let cli = Cli::parse();
+    if let Some(Cmd::Attach { id, new }) = cli.cmd {
+        attach_cli(id, new);
+    }
     let open_settings = matches!(cli.cmd, Some(Cmd::Settings));
     let cfg = Config::load();
     let window = window::Settings {
@@ -562,4 +777,68 @@ fn main() -> iced::Result {
         app = app.font(*face);
     }
     app.run()
+}
+
+fn attach_cli(id: Option<u64>, new: bool) -> ! {
+    if new && id.is_some() {
+        eprintln!("vps: --new and --id cannot both be set");
+        std::process::exit(1);
+    }
+    let spec = match id {
+        Some(id) => AttachSpec::Id(id),
+        None => AttachSpec::New,
+    };
+    let cfg = Config::load();
+    if terminal::needs_chooser(&cfg) {
+        eprintln!("vps: no terminal chosen — run vps and pick one");
+        std::process::exit(1);
+    }
+    terminal::exec_attach(&cfg, spec);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grok_title_in_row() {
+        let s = SessionInfo {
+            id: 1,
+            pts: "/dev/pts/1".into(),
+            pid: 1,
+            attached: false,
+            cwd: "/home/tj".into(),
+            command: "grok".into(),
+            title: "FOO".into(),
+        };
+        assert_eq!(session_command_label(&s), "grok [FOO]");
+    }
+
+    #[test]
+    fn grok_path_title() {
+        let s = SessionInfo {
+            id: 1,
+            pts: "/dev/pts/1".into(),
+            pid: 1,
+            attached: false,
+            cwd: "/home/tj".into(),
+            command: "/home/tj/.local/bin/grok --resume x".into(),
+            title: "VPS".into(),
+        };
+        assert_eq!(session_command_label(&s), "grok [VPS]");
+    }
+
+    #[test]
+    fn empty_command_is_bash() {
+        let s = SessionInfo {
+            id: 1,
+            pts: "/dev/pts/1".into(),
+            pid: 1,
+            attached: false,
+            cwd: String::new(),
+            command: String::new(),
+            title: String::new(),
+        };
+        assert_eq!(session_command_label(&s), "bash");
+    }
 }

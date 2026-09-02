@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use iced::Font;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy)]
@@ -21,6 +20,16 @@ pub struct Config {
     pub font: FontCfg,
     pub term: Term,
     pub colors: Colors,
+    pub terminal: Terminal,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Terminal {
+    /// Session window. Empty → first-run chooser. iced is the picker only.
+    pub program: String,
+    /// Extra argv after the emulator's own flags and before `ssh`.
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -248,49 +257,11 @@ impl Config {
         }
     }
 
-    pub fn iced_font(&self) -> Font {
-        Font::with_name(crate::fonts::load(&self.font).family)
-    }
-
     pub fn term_env(&self) -> HashMap<String, String> {
         let mut env = HashMap::new();
         env.insert("TERM".into(), self.term.term.clone());
         env.insert("COLORTERM".into(), self.term.colorterm.clone());
         env
-    }
-
-    pub fn palette(&self) -> iced_term::ColorPalette {
-        let c = &self.colors;
-        iced_term::ColorPalette {
-            foreground: c.foreground.clone(),
-            background: c.background.clone(),
-            black: c.black.clone(),
-            red: c.red.clone(),
-            green: c.green.clone(),
-            yellow: c.yellow.clone(),
-            blue: c.blue.clone(),
-            magenta: c.magenta.clone(),
-            cyan: c.cyan.clone(),
-            white: c.white.clone(),
-            bright_black: c.bright_black.clone(),
-            bright_red: c.bright_red.clone(),
-            bright_green: c.bright_green.clone(),
-            bright_yellow: c.bright_yellow.clone(),
-            bright_blue: c.bright_blue.clone(),
-            bright_magenta: c.bright_magenta.clone(),
-            bright_cyan: c.bright_cyan.clone(),
-            bright_white: c.bright_white.clone(),
-            bright_foreground: c.bright_foreground.clone(),
-            dim_foreground: c.dim_foreground.clone(),
-            dim_black: c.dim_black.clone(),
-            dim_red: c.dim_red.clone(),
-            dim_green: c.dim_green.clone(),
-            dim_yellow: c.dim_yellow.clone(),
-            dim_blue: c.dim_blue.clone(),
-            dim_magenta: c.dim_magenta.clone(),
-            dim_cyan: c.dim_cyan.clone(),
-            dim_white: c.dim_white.clone(),
-        }
     }
 }
 
@@ -321,6 +292,10 @@ mod tests {
         assert!(!cfg.ssh.remote.is_empty());
         assert_eq!(cfg.colors.background, "#241018");
         assert!(cfg.font.size > 0.0);
+        assert!(
+            cfg.terminal.program.is_empty(),
+            "empty program triggers the first-run chooser"
+        );
     }
 
     #[test]
