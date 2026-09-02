@@ -20,6 +20,7 @@ struct App {
     cfg: Config,
     title: String,
     mode: Mode,
+    pending_err: Option<String>,
 }
 
 enum Mode {
@@ -69,6 +70,7 @@ impl App {
                 Self {
                     title: format!("vps · {host} · settings"),
                     cfg: cfg.clone(),
+                    pending_err: None,
                     mode: Mode::Settings {
                         form: Box::new(settings::Form::from_cfg(&cfg)),
                         back: None,
@@ -81,6 +83,7 @@ impl App {
             Self {
                 title: format!("vps · {host}"),
                 cfg: cfg.clone(),
+                pending_err: None,
                 mode: Mode::Loading,
             },
             Task::perform(async move { list_sessions(&cfg) }, Event::Listed),
@@ -94,11 +97,12 @@ impl App {
     fn update(&mut self, event: Event) -> Task<Event> {
         match event {
             Event::Listed(Ok(sessions)) => {
-                if self.cfg.want_picker(sessions.len()) {
+                let err = self.pending_err.take();
+                if self.cfg.want_picker(sessions.len()) || err.is_some() {
                     self.mode = Mode::Pick {
                         sessions,
                         cursor: 0,
-                        err: None,
+                        err,
                     };
                     Task::none()
                 } else {
@@ -119,7 +123,17 @@ impl App {
                 if let Mode::Term { term } = &mut self.mode {
                     match term.handle(iced_term::Command::ProxyToBackend(cmd)) {
                         iced_term::actions::Action::Shutdown => {
-                            return window::latest().and_then(window::close);
+                            self.pending_err = Some(
+                                "attach ended — pick the session again (Grok was still drawing)"
+                                    .into(),
+                            );
+                            self.title = format!("vps · {}", self.cfg.ssh.host);
+                            self.mode = Mode::Loading;
+                            let cfg = self.cfg.clone();
+                            return Task::perform(
+                                async move { list_sessions(&cfg) },
+                                Event::Listed,
+                            );
                         }
                         iced_term::actions::Action::ChangeTitle(title) => {
                             self.title = title;
