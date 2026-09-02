@@ -1,0 +1,12 @@
+[Unit]
+Description=vps PTY daemon (Unix socket, never TCP)
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/vpsd daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
