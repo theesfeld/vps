@@ -4,6 +4,9 @@ use std::collections::HashMap;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
+
 use crate::pty::{self, Session};
 
 pub struct Slot {
@@ -39,6 +42,8 @@ impl Hub {
             let slot = self.slots.get_mut(&id).expect("idle id");
             slot.attached = true;
             let _ = pty::set_winsize(slot.session.master.as_raw_fd(), &ws);
+            let pid = slot.session.child.id() as i32;
+            let _ = kill(Pid::from_raw(pid), Signal::SIGWINCH);
             let clone = slot
                 .session
                 .master

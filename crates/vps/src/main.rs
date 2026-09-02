@@ -38,12 +38,14 @@ impl App {
         };
 
         let term = Terminal::new(0, settings).expect("terminal");
+        // iced_term ignores keys until the widget is focused (click). Grab it.
+        let focus = iced_term::TerminalView::focus(term.widget_id().clone());
         (
             Self {
                 title: format!("vps · {}", cfg.ssh.host),
                 term,
             },
-            Task::none(),
+            Task::batch([focus, window::latest().and_then(window::gain_focus)]),
         )
     }
 

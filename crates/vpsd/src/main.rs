@@ -15,6 +15,7 @@ use vps_protocol::{decode_line, encode_line, Listen, Message};
 mod config;
 mod hub;
 mod pty;
+mod tty;
 
 use config::DaemonConfig;
 use hub::{new_shared, SharedHub};
@@ -180,22 +181,28 @@ fn attach_via_daemon(sock: &Path, cols: u16, rows: u16) -> Result<(), Box<dyn st
     let hello = read_line(&mut stream)?;
     match decode_line(&hello)? {
         Message::Hello { id, .. } => {
-            eprintln!("vpsd: attached session {id}");
+            if std::env::var_os("VPSD_DEBUG").is_some() {
+                eprintln!("vpsd: attached session {id}");
+            }
         }
         Message::Error { msg } => return Err(msg.into()),
         other => return Err(format!("unexpected {other:?}").into()),
     }
+    let _raw = tty::RawTty::enter()?;
     splice_fds(libc::STDIN_FILENO, libc::STDOUT_FILENO, stream.as_raw_fd())?;
     Ok(())
 }
 
 fn attach_oneshot(ws: nix::pty::Winsize, shell: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut session = pty::spawn_login_shell(ws, shell)?;
-    eprintln!(
-        "vpsd: pts {} pid {} (oneshot)",
-        session.pts_name,
-        session.child.id()
-    );
+    if std::env::var_os("VPSD_DEBUG").is_some() {
+        eprintln!(
+            "vpsd: pts {} pid {} (oneshot)",
+            session.pts_name,
+            session.child.id()
+        );
+    }
+    let _raw = tty::RawTty::enter()?;
     splice_fds(
         libc::STDIN_FILENO,
         libc::STDOUT_FILENO,
