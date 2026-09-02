@@ -74,7 +74,7 @@ sequenceDiagram
 2. Its child is **OpenSSH**: `ssh -tt grok '/home/tj/.local/bin/vpsd attach'`. `-tt` forces a remote tty. ControlMaster on `Host grok` makes the extra hop cheap.
 3. **`vpsd attach`** requires a tty. It connects to the **Unix socket** the daemon bound (never a port).
 4. **`vpsd daemon`** (systemd `--user` on grok) owns the PTY table and a **scrollback ring** of PTY output (`scrollback_bytes`). `open` creates a PTY; `attach --id` reconnects.
-5. Closing the window ends the SSH splice. The daemon **detaches**; the shell keeps running. Reattach **replays** stored output into the new window (the kernel PTY itself has no history), then continues live. A second window while the first is still up is a **new** PTY.
+5. Closing the window ends the SSH splice. The daemon **detaches**; the shell keeps running. Shell reattach **replays** stored output. **TUI apps (Grok’s logo, vim)** skip that replay — dumping megabytes of animation frames kills the new window — and get a SIGWINCH so they redraw the current screen.
 
 `SSH_CONNECTION` is stripped from the login shell so `~/.bashrc.d/zellij.sh` does not `exec zellij` on these PTYs.
 
@@ -133,7 +133,7 @@ Replace a running binary: `systemctl --user stop vpsd` first (ETXTBSY otherwise)
 | Close the window | SSH splice ends. **The PTY stays.** `grok` / builds / vim keep running. |
 | Close the laptop | Same as close: SSH dies, daemon detaches, PTY stays. |
 | Super+Shift+Return again | Picker: **idle** sessions you can reconnect, **live** ones already in another window, **+ new session**. |
-| Enter on an idle row | `vpsd attach --id N` — same shell, **replayed scrollback**, then live |
+| Enter on an idle row | `vpsd attach --id N` — shell: replayed `ls`; Grok/vim: redraw, not logo replay |
 | `n` or **+ new session** | `vpsd attach --new` |
 | Enter on a **live** row | takes over that PTY (other window, if any, detaches) |
 | `ssh grok` | unchanged: zellij `grok-build` |

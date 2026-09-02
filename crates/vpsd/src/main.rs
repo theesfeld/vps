@@ -204,7 +204,7 @@ fn splice_session(
         let replay = hub
             .lock()
             .map_err(|e| std::io::Error::other(e.to_string()))?
-            .scrollback(id);
+            .replay_on_attach(id);
         if !replay.is_empty() {
             write_or_gone(stream, &replay)?;
         }

@@ -14,6 +14,8 @@ pub struct Slot {
     pub session: Session,
     pub attached: bool,
     pub scrollback: VecDeque<u8>,
+    /// Sticky: once we see alt-screen / dense CSI (Grok logo, vim, …).
+    pub tui: bool,
 }
 
 pub struct Hub {
@@ -46,6 +48,7 @@ impl Hub {
                 session,
                 attached: true,
                 scrollback: VecDeque::new(),
+                tui: false,
             },
         );
         Ok((id, clone))
@@ -67,25 +70,34 @@ impl Hub {
             .map_err(std::io::Error::other)
     }
 
-    pub fn scrollback(&self, id: u64) -> Vec<u8> {
-        self.slots
-            .get(&id)
-            .map(|s| s.scrollback.iter().copied().collect())
-            .unwrap_or_default()
+    /// Grok / vim: do not replay the logo animation. Shell: replay `ls` etc.
+    pub fn replay_on_attach(&self, id: u64) -> Vec<u8> {
+        match self.slots.get(&id) {
+            Some(s) if s.tui => Vec::new(),
+            Some(s) => s.scrollback.iter().copied().collect(),
+            None => Vec::new(),
+        }
     }
 
     pub fn push_output(&mut self, id: u64, bytes: &[u8]) {
         let Some(slot) = self.slots.get_mut(&id) else {
             return;
         };
-        let limit = self.scrollback_limit;
+        if !slot.tui && looks_like_tui(bytes) {
+            slot.tui = true;
+        }
         slot.scrollback.extend(bytes);
+        let limit = if slot.tui {
+            64 * 1024
+        } else {
+            self.scrollback_limit
+        };
         let mut trimmed = false;
         while slot.scrollback.len() > limit {
             slot.scrollback.pop_front();
             trimmed = true;
         }
-        if trimmed {
+        if trimmed && !slot.tui {
             while let Some(b) = slot.scrollback.front().copied() {
                 slot.scrollback.pop_front();
                 if b == b'\n' {
@@ -99,6 +111,8 @@ impl Hub {
         if let Some(slot) = self.slots.get(&id) {
             let pid = slot.session.child.id() as i32;
             let _ = kill(Pid::from_raw(pid), Signal::SIGWINCH);
+            // Grok is a child of bash; the session leader's group gets the winch.
+            let _ = kill(Pid::from_raw(-pid), Signal::SIGWINCH);
         }
     }
 
@@ -221,9 +235,33 @@ pub fn new_shared_with_limit(shell: String, scrollback_limit: usize) -> SharedHu
     Arc::new(Mutex::new(Hub::new(shell, scrollback_limit)))
 }
 
+pub fn looks_like_tui(bytes: &[u8]) -> bool {
+    if bytes
+        .windows(8)
+        .any(|w| w == b"\x1b[?1049h" || w == b"\x1b[?1047h")
+    {
+        return true;
+    }
+    if bytes.windows(6).any(|w| w == b"\x1b[?25l") {
+        return true;
+    }
+    if bytes.is_empty() {
+        return false;
+    }
+    let esc = bytes.iter().filter(|b| **b == 0x1b).count();
+    esc.saturating_mul(8) > bytes.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tui_detects_alt_screen_and_logo_csi() {
+        assert!(looks_like_tui(b"\x1b[?1049h\x1b[2Jgrok"));
+        assert!(looks_like_tui(b"\x1b[?25l"));
+        assert!(!looks_like_tui(b"ls -asl\nfile\n[tj@host ~]$ "));
+    }
 
     #[test]
     fn attach_steals_already_attached() {
