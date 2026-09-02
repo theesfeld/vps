@@ -35,7 +35,9 @@ impl Screen {
             .resize(TermSize::new(cols.max(1) as usize, rows.max(1) as usize));
     }
 
-    /// Visible cells as SGR-less ANSI (CUP + characters). Enough for Grok's layout.
+    /// Visible cells as SGR-less ANSI. Kept for tests; attach does not send this
+    /// (it crashed iced). TUI resume uses a live size-change redraw instead.
+    #[allow(dead_code)]
     pub fn dump_ansi(&self) -> Vec<u8> {
         let cols = self.term.columns();
         let rows = self.term.screen_lines();
