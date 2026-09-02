@@ -58,6 +58,10 @@ enum Cmd {
 }
 
 fn main() {
+    // Writes to a closed unix socket must return EPIPE, not kill the daemon.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
     if let Err(e) = run() {
         eprintln!("vpsd: {e}");
         std::process::exit(1);
@@ -188,43 +192,68 @@ fn splice_session(
         .ok()
         .and_then(|h| h.pts_name(id).map(str::to_string))
         .unwrap_or_default();
-    stream.write_all(
-        encode_line(&Message::Hello {
-            v: vps_protocol::VERSION,
-            id,
-        })?
-        .as_bytes(),
-    )?;
-    let replay = hub
-        .lock()
-        .map_err(|e| std::io::Error::other(e.to_string()))?
-        .scrollback(id);
-    if !replay.is_empty() {
-        stream.write_all(&replay)?;
-    }
-    hub.lock()
-        .map_err(|e| std::io::Error::other(e.to_string()))?
-        .winch(id);
     eprintln!("vpsd: session {id} pts {pts}");
     let hub_out = hub.clone();
-    let end = splice_fds(
-        stream.as_raw_fd(),
-        stream.as_raw_fd(),
-        master.as_raw_fd(),
-        move |bytes| {
-            if let Ok(mut h) = hub_out.lock() {
-                h.push_output(id, bytes);
-            }
-        },
-    )?;
-    let mut h = hub
-        .lock()
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    match end {
-        SpliceEnd::ClientGone => h.detach(id),
-        SpliceEnd::MasterGone => h.drop_session(id),
+    let splice_result = (|| -> std::io::Result<SpliceEnd> {
+        let hello = encode_line(&Message::Hello {
+            v: vps_protocol::VERSION,
+            id,
+        })
+        .map_err(std::io::Error::other)?;
+        write_or_gone(stream, hello.as_bytes())?;
+        let replay = hub
+            .lock()
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+            .scrollback(id);
+        if !replay.is_empty() {
+            write_or_gone(stream, &replay)?;
+        }
+        hub.lock()
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+            .winch(id);
+        splice_fds(
+            stream.as_raw_fd(),
+            stream.as_raw_fd(),
+            master.as_raw_fd(),
+            move |bytes| {
+                if let Ok(mut h) = hub_out.lock() {
+                    h.push_output(id, bytes);
+                }
+            },
+        )
+    })();
+    {
+        let mut h = hub
+            .lock()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        match &splice_result {
+            Ok(SpliceEnd::MasterGone) => h.drop_session(id),
+            _ => h.detach(id),
+        }
     }
-    Ok(())
+    match splice_result {
+        Ok(_) => Ok(()),
+        Err(e) if is_disconnect(&e) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn is_disconnect(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::UnexpectedEof
+    ) || matches!(err.raw_os_error(), Some(libc::EPIPE | libc::ECONNRESET))
+}
+
+fn write_or_gone(stream: &mut UnixStream, buf: &[u8]) -> std::io::Result<()> {
+    match stream.write_all(buf) {
+        Ok(()) => Ok(()),
+        Err(e) if is_disconnect(&e) => Err(e),
+        Err(e) => Err(e),
+    }
 }
 
 fn list_cmd(cfg: &DaemonConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -400,7 +429,11 @@ fn splice_fds(
                         return Err(err);
                     }
                 } else if libc::write(master_fd, buf.as_ptr() as *const _, n as usize) < 0 {
-                    return Err(std::io::Error::last_os_error());
+                    let err = std::io::Error::last_os_error();
+                    if is_disconnect(&err) {
+                        return Ok(SpliceEnd::ClientGone);
+                    }
+                    return Err(err);
                 }
             }
             if libc::FD_ISSET(master_fd, &rfds) {
@@ -416,7 +449,11 @@ fn splice_fds(
                 } else {
                     on_master(&buf[..n as usize]);
                     if libc::write(stdout_fd, buf.as_ptr() as *const _, n as usize) < 0 {
-                        return Err(std::io::Error::last_os_error());
+                        let err = std::io::Error::last_os_error();
+                        if is_disconnect(&err) {
+                            return Ok(SpliceEnd::ClientGone);
+                        }
+                        return Err(err);
                     }
                 }
             }

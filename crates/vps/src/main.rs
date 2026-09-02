@@ -169,14 +169,7 @@ impl App {
                     self.enter_settings()
                 } else {
                     let s = sessions[*cursor].clone();
-                    if s.attached {
-                        if let Mode::Pick { err, .. } = &mut self.mode {
-                            *err = Some(format!("session {} is already in another window", s.id));
-                        }
-                        Task::none()
-                    } else {
-                        self.enter_term(AttachSpec::Id(s.id))
-                    }
+                    self.enter_term(AttachSpec::Id(s.id))
                 }
             }
             _ => Task::none(),

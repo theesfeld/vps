@@ -58,11 +58,7 @@ impl Hub {
             .slots
             .get_mut(&id)
             .ok_or_else(|| std::io::Error::other(format!("no session {id}")))?;
-        if slot.attached {
-            return Err(std::io::Error::other(format!(
-                "session {id} already attached"
-            )));
-        }
+        // Steal if a previous client died without clearing the flag (EPIPE).
         slot.attached = true;
         let _ = pty::set_winsize(slot.session.master.as_raw_fd(), &ws);
         slot.session
@@ -223,4 +219,19 @@ pub type SharedHub = Arc<Mutex<Hub>>;
 
 pub fn new_shared_with_limit(shell: String, scrollback_limit: usize) -> SharedHub {
     Arc::new(Mutex::new(Hub::new(shell, scrollback_limit)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attach_steals_already_attached() {
+        let mut hub = Hub::new("/bin/bash".into(), 4096);
+        let (id, fd1) = hub.create(80, 24).unwrap();
+        let fd2 = hub.attach(id, 80, 24).expect("steal stale attached");
+        drop(fd1);
+        drop(fd2);
+        hub.drop_session(id);
+    }
 }
