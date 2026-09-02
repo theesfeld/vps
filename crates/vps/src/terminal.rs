@@ -20,7 +20,22 @@ pub struct Detected {
 }
 
 pub fn needs_chooser(cfg: &Config) -> bool {
-    cfg.terminal.program.trim().is_empty()
+    !program_is_runnable(cfg.terminal.program.trim())
+}
+
+pub fn program_is_runnable(program: &str) -> bool {
+    !program.is_empty() && resolve_program(program).is_ok()
+}
+
+/// Why the chooser is showing. `None` if `program` is empty (first run) or fine.
+pub fn missing_terminal_message(cfg: &Config) -> Option<String> {
+    let program = cfg.terminal.program.trim();
+    if program.is_empty() {
+        return None;
+    }
+    resolve_program(program)
+        .err()
+        .map(|e| format!("{e} — pick another terminal"))
 }
 
 pub fn detect() -> Vec<Detected> {
@@ -228,7 +243,7 @@ fn basename(path: &str) -> &str {
         .unwrap_or(path)
 }
 
-fn resolve_program(program: &str) -> Result<String, String> {
+pub fn resolve_program(program: &str) -> Result<String, String> {
     let p = Path::new(program);
     if p.components().count() > 1 || program.contains('/') {
         if is_runnable(p) {
@@ -263,12 +278,87 @@ mod tests {
         cfg
     }
 
+    fn make_exec(name: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "vps-term-{}-{name}-{}",
+            std::process::id(),
+            name.len()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join(name);
+        std::fs::write(&bin, b"").unwrap();
+        let mut p = std::fs::metadata(&bin).unwrap().permissions();
+        p.set_mode(0o755);
+        std::fs::set_permissions(&bin, p).unwrap();
+        (dir, bin)
+    }
+
     #[test]
     fn empty_program_needs_chooser() {
         assert!(needs_chooser(&Config::default()));
+        assert!(missing_terminal_message(&Config::default()).is_none());
+    }
+
+    #[test]
+    fn runnable_path_skips_chooser() {
+        let (dir, bin) = make_exec("myterm");
         let mut cfg = Config::default();
-        cfg.terminal.program = "kitty".into();
+        cfg.terminal.program = bin.display().to_string();
         assert!(!needs_chooser(&cfg));
+        assert!(missing_terminal_message(&cfg).is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn deleted_program_needs_chooser() {
+        let (dir, bin) = make_exec("gone");
+        let mut cfg = Config::default();
+        cfg.terminal.program = bin.display().to_string();
+        assert!(!needs_chooser(&cfg));
+        std::fs::remove_file(&bin).unwrap();
+        assert!(needs_chooser(&cfg));
+        let msg = missing_terminal_message(&cfg).expect("reason");
+        assert!(msg.contains("pick another terminal"), "{msg}");
+        assert!(
+            msg.contains("gone") || msg.contains("not an executable"),
+            "{msg}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn non_executable_needs_chooser() {
+        let (dir, bin) = make_exec("noperm");
+        let mut p = std::fs::metadata(&bin).unwrap().permissions();
+        p.set_mode(0o644);
+        std::fs::set_permissions(&bin, p).unwrap();
+        let mut cfg = Config::default();
+        cfg.terminal.program = bin.display().to_string();
+        assert!(needs_chooser(&cfg));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn broken_symlink_needs_chooser() {
+        let dir = std::env::temp_dir().join(format!("vps-term-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("term");
+        std::os::unix::fs::symlink(dir.join("missing"), &link).unwrap();
+        let mut cfg = Config::default();
+        cfg.terminal.program = link.display().to_string();
+        assert!(needs_chooser(&cfg));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn basename_not_on_path_needs_chooser() {
+        let mut cfg = Config::default();
+        cfg.terminal.program = "vps-no-such-terminal-xyz".into();
+        assert!(needs_chooser(&cfg));
+        let msg = missing_terminal_message(&cfg).expect("reason");
+        assert!(msg.contains("not found on PATH"), "{msg}");
     }
 
     #[test]

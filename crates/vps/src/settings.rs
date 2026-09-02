@@ -207,7 +207,7 @@ pub fn view<'a>(cfg: &'a Config, form: &'a Form) -> Element<'a, Msg> {
         field("list", &form.list, Msg::List),
         heading(cfg, "terminal"),
         field(
-            "program (empty = chooser next start; kitty/foot/alacritty/ghostty/wezterm or a path)",
+            "program (empty or missing binary = chooser; kitty/foot/alacritty/ghostty/wezterm or a path)",
             &form.terminal_program,
             Msg::TerminalProgram,
         ),

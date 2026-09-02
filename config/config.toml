@@ -29,7 +29,9 @@ mode = "when_sessions"
 # Session window. iced is the picker only — it cannot host Grok (alt-screen
 # flood). Empty program → first-run chooser of known terminals on PATH
 # (kitty, foot, alacritty, ghostty, wezterm). Enter writes this file.
-# Switch later: picker `t`, or this field / `vps settings`.
+# If the saved binary is deleted or no longer executable, the chooser
+# comes back with a reason. Switch later: picker `t`, or this field /
+# `vps settings`.
 # A path or a basename. Extra args sit after the emulator's own flags
 # and before `ssh`. Unknown binaries: `{program} {args…} ssh …`
 # (put `-e` in args if that emulator needs it).

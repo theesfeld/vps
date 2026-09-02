@@ -33,7 +33,7 @@ Mosh is the wrong tunnel for a mux. SSH is the tunnel. ControlMaster already on 
 
 iced cannot host the TTY. Empirically: `ssh -tt grok vpsd attach --id 1` inside a real terminal shows the Grok UI; the same splice inside iced_term returns to the picker with “attach ended — pick the session again (Grok was still drawing)”.
 
-The session window is **the user’s terminal**. Empty `[terminal].program` → first-run chooser (known binaries on PATH, plus a path in settings). `t` in the picker or `vps settings` switches later. Recipes use each emulator’s documented CLI (kitty, foot, alacritty, ghostty, wezterm); anything else is `program args… ssh …`.
+The session window is **the user’s terminal**. Empty `[terminal].program` → first-run chooser (known binaries on PATH, plus a path in settings). If that binary is later deleted or not executable, the chooser comes back. `t` in the picker or `vps settings` switches later. Recipes use each emulator’s documented CLI (kitty, foot, alacritty, ghostty, wezterm); anything else is `program args… ssh …`.
 
 ## Crates
 
@@ -48,6 +48,7 @@ The session window is **the user’s terminal**. Empty `[terminal].program` → 
 - `vps` crate does not depend on `iced_term`
 - `vpsd` refuses to listen on TCP (tested)
 - Empty `terminal.program` → chooser before attach; choice is written to `~/.config/vps/config.toml`
+- Saved `terminal.program` missing or not executable → chooser again (with a reason), not a silent spawn failure
 - Settings and picker `t` can change the terminal later
 - Super+Shift+Return: if any PTYs exist, iced picker; Enter opens the **chosen** terminal running `ssh -tt grok vpsd attach --id N` and closes the picker
 - Zero sessions (and a terminal already chosen): skip the picker, spawn `--new`

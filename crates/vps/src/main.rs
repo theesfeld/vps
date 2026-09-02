@@ -99,11 +99,11 @@ impl App {
             return (
                 Self {
                     title: format!("vps · {host} · terminal"),
-                    cfg,
+                    cfg: cfg.clone(),
                     mode: Mode::ChooseTerm {
                         found: terminal::detect(),
                         cursor: 0,
-                        err: None,
+                        err: terminal::missing_terminal_message(&cfg),
                         first: true,
                         back: None,
                     },
@@ -309,11 +309,16 @@ impl App {
 
     fn enter_term(&mut self, spec: AttachSpec) -> Task<Event> {
         if terminal::needs_chooser(&self.cfg) {
-            return self.enter_chooser(true);
+            let first = !matches!(self.mode, Mode::Pick { .. });
+            return self.enter_chooser(first);
         }
         match terminal::spawn_session(&self.cfg, spec) {
             Ok(()) => window::latest().and_then(window::close),
             Err(e) => {
+                if terminal::needs_chooser(&self.cfg) {
+                    let first = !matches!(self.mode, Mode::Pick { .. });
+                    return self.enter_chooser(first);
+                }
                 match &mut self.mode {
                     Mode::Pick { err, .. } => *err = Some(e),
                     _ => {
@@ -341,7 +346,7 @@ impl App {
         self.mode = Mode::ChooseTerm {
             found: terminal::detect(),
             cursor: 0,
-            err: None,
+            err: terminal::missing_terminal_message(&self.cfg),
             first,
             back,
         };

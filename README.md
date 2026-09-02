@@ -73,7 +73,7 @@ sequenceDiagram
 ```
 
 1. **`vps`** is an iced **picker** (and settings / first-run terminal chooser). App id `vps`. Palette is Irongall with the ground shifted red. It is not the TTY — iced_term died on Grok’s alt-screen flood.
-2. The session window is **your terminal** (`[terminal].program`). Empty → chooser of known binaries on PATH (kitty, foot, alacritty, ghostty, wezterm). Recipes use each emulator’s documented CLI for class/app-id (and colors where the docs name the flag). Switch later with picker `t` or `vps settings`.
+2. The session window is **your terminal** (`[terminal].program`). Empty → chooser of known binaries on PATH (kitty, foot, alacritty, ghostty, wezterm). If the saved program is deleted or not executable, the chooser comes back with a reason. Recipes use each emulator’s documented CLI for class/app-id (and colors where the docs name the flag). Switch later with picker `t` or `vps settings`.
 3. That window’s child is **OpenSSH**: `ssh -tt grok '/home/tj/.local/bin/vpsd attach'`. `-tt` forces a remote tty. ControlMaster on `Host grok` makes the extra hop cheap.
 4. **`vpsd attach`** requires a tty. It connects to the **Unix socket** the daemon bound (never a port).
 5. **`vpsd daemon`** (systemd `--user` on grok) owns the PTY table and a **scrollback ring** of PTY output (`scrollback_bytes`). `open` creates a PTY; `attach --id` reconnects.
@@ -132,7 +132,7 @@ Replace a running binary: `systemctl --user stop vpsd` first (ETXTBSY otherwise)
 
 | You do | What happens on grok |
 | --- | --- |
-| Super+Shift+Return | `vps` lists PTYs over SSH (`vpsd list`). If any exist, a picker. If none (and a terminal is chosen), a new PTY. First run: choose a terminal. |
+| Super+Shift+Return | `vps` lists PTYs over SSH (`vpsd list`). If any exist, a picker. If none (and a terminal is chosen), a new PTY. First run, or the saved terminal is gone: choose a terminal. |
 | Close the terminal | SSH splice ends. **The PTY stays.** `grok` / builds / vim keep running. |
 | Close the laptop | Same as close: SSH dies, daemon detaches, PTY stays. |
 | Super+Shift+Return again | Picker: **idle** sessions you can reconnect, **live** ones already in another window, **+ new session**. |
@@ -186,7 +186,7 @@ Shipped copies are **the defaults**, commented. Every modifiable knob is a key. 
 | `[ssh]` | `list` | `"/home/tj/.local/bin/vpsd list"` | JSON session list, no tty |
 | `[ssh]` | `list_args` | `["-T"]` | ssh argv for the list hop |
 | `[picker]` | `mode` | `"when_sessions"` | `when_sessions` / `always` / `never` |
-| `[terminal]` | `program` | `""` | Session emulator. Empty → first-run chooser. Basename or path. |
+| `[terminal]` | `program` | `""` | Session emulator. Empty or missing binary → chooser. Basename or path. |
 | `[terminal]` | `args` | `[]` | Extra argv after the emulator’s flags, before `ssh` |
 | `[window]` | `width` / `height` | `1280.0` / `800.0` | Initial size (pixels) |
 | `[window]` | `app_id` | `"vps"` | Wayland app id |
@@ -202,7 +202,7 @@ Shipped copies are **the defaults**, commented. Every modifiable knob is a key. 
 
 iced does not talk to fontconfig. The **picker** runs `fc-match` (the same database kitty uses), reads the TTF/OTF files, and registers them with iced. Empty `family` is fontconfig `monospace`. The session window uses the chosen emulator’s own font settings, plus documented CLI overrides when we have them (kitty `-o font_family`, foot `--font`, ghostty `--font-family`).
 
-`[terminal].program` empty means “ask”. Known names get a recipe (class/app-id, and colors for kitty/foot/ghostty). Anything else is `{program} {args…} ssh …` — put `-e` in `args` if that emulator needs it.
+`[terminal].program` empty means “ask”. A path or basename that is gone (uninstalled, deleted, not executable, broken symlink) is the same: Super+Shift+Return shows the chooser again instead of failing to spawn. Known names get a recipe (class/app-id, and colors for kitty/foot/ghostty). Anything else is `{program} {args…} ssh …` — put `-e` in `args` if that emulator needs it.
 
 `ssh.remote` must stay a **single** string. OpenSSH concatenates extra argv with spaces and passes the result to `$SHELL -c`. Splitting `vpsd` and `attach` makes bash treat `attach` as a leftover argument; you get `vpsd` help and the window dies.
 
