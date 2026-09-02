@@ -15,6 +15,7 @@ use vps_protocol::{decode_line, encode_line, Listen, Message};
 mod config;
 mod hub;
 mod pty;
+mod snapshot;
 mod tty;
 
 use config::DaemonConfig;
@@ -160,14 +161,14 @@ fn handle_unix_client(
                 .lock()
                 .map_err(|e| std::io::Error::other(e.to_string()))?
                 .create(cols, rows)?;
-            splice_session(&mut stream, hub, id, master)?;
+            splice_session(&mut stream, hub, id, master, cols, rows)?;
         }
         Message::Attach { id, cols, rows } => {
             let master = hub
                 .lock()
                 .map_err(|e| std::io::Error::other(e.to_string()))?
                 .attach(id, cols, rows)?;
-            splice_session(&mut stream, hub, id, master)?;
+            splice_session(&mut stream, hub, id, master, cols, rows)?;
         }
         other => {
             let _ = stream.write_all(
@@ -186,6 +187,8 @@ fn splice_session(
     hub: SharedHub,
     id: u64,
     master: std::os::fd::OwnedFd,
+    cols: u16,
+    rows: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let pts = hub
         .lock()
@@ -208,9 +211,19 @@ fn splice_session(
         if !replay.is_empty() {
             write_or_gone(stream, &replay)?;
         }
-        hub.lock()
+        let tui = hub
+            .lock()
             .map_err(|e| std::io::Error::other(e.to_string()))?
-            .winch(id);
+            .is_tui(id);
+        if tui {
+            hub.lock()
+                .map_err(|e| std::io::Error::other(e.to_string()))?
+                .force_redraw(id, cols, rows);
+        } else {
+            hub.lock()
+                .map_err(|e| std::io::Error::other(e.to_string()))?
+                .winch(id);
+        }
         splice_fds(
             stream.as_raw_fd(),
             stream.as_raw_fd(),

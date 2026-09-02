@@ -9,6 +9,7 @@ use nix::unistd::Pid;
 use vps_protocol::SessionInfo;
 
 use crate::pty::{self, Session};
+use crate::snapshot::Screen;
 
 pub struct Slot {
     pub session: Session,
@@ -16,6 +17,7 @@ pub struct Slot {
     pub scrollback: VecDeque<u8>,
     /// Sticky: once we see alt-screen / dense CSI (Grok logo, vim, …).
     pub tui: bool,
+    pub screen: Screen,
 }
 
 pub struct Hub {
@@ -49,6 +51,7 @@ impl Hub {
                 attached: true,
                 scrollback: VecDeque::new(),
                 tui: false,
+                screen: Screen::new(cols, rows),
             },
         );
         Ok((id, clone))
@@ -64,19 +67,44 @@ impl Hub {
         // Steal if a previous client died without clearing the flag (EPIPE).
         slot.attached = true;
         let _ = pty::set_winsize(slot.session.master.as_raw_fd(), &ws);
+        slot.screen.resize(cols, rows);
         slot.session
             .master
             .try_clone()
             .map_err(std::io::Error::other)
     }
 
-    /// Grok / vim: do not replay the logo animation. Shell: replay `ls` etc.
+    /// Grok / vim: dump the live grid (not the logo animation stream).
+    /// Shell: replay captured `ls` output.
     pub fn replay_on_attach(&self, id: u64) -> Vec<u8> {
         match self.slots.get(&id) {
-            Some(s) if s.tui => Vec::new(),
+            Some(s) if s.tui => s.screen.dump_ansi(),
             Some(s) => s.scrollback.iter().copied().collect(),
             None => Vec::new(),
         }
+    }
+
+    pub fn is_tui(&self, id: u64) -> bool {
+        self.slots.get(&id).map(|s| s.tui).unwrap_or(false)
+    }
+
+    pub fn force_redraw(&self, id: u64, cols: u16, rows: u16) {
+        let alt = if rows > 2 {
+            rows - 1
+        } else {
+            rows.saturating_add(1)
+        };
+        if let Some(slot) = self.slots.get(&id) {
+            let fd = slot.session.master.as_raw_fd();
+            let _ = pty::set_winsize(fd, &pty::winsize(cols, alt));
+        }
+        self.winch(id);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if let Some(slot) = self.slots.get(&id) {
+            let fd = slot.session.master.as_raw_fd();
+            let _ = pty::set_winsize(fd, &pty::winsize(cols, rows));
+        }
+        self.winch(id);
     }
 
     pub fn push_output(&mut self, id: u64, bytes: &[u8]) {
@@ -86,6 +114,7 @@ impl Hub {
         if !slot.tui && looks_like_tui(bytes) {
             slot.tui = true;
         }
+        slot.screen.feed(bytes);
         slot.scrollback.extend(bytes);
         let limit = if slot.tui {
             64 * 1024
