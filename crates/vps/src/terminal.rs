@@ -4,6 +4,7 @@
 //! tty does not. Flags below are from each emulator's current official CLI.
 
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -118,36 +119,48 @@ pub fn attach_argv(cfg: &Config, spec: AttachSpec) -> Result<Vec<String>, String
 }
 
 pub fn spawn_session(cfg: &Config, spec: AttachSpec) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let argv = niri_attach_argv(&exe, spec);
+    let result = run_logged(&argv);
+    if result.is_ok() {
+        return result;
+    }
+    let niri_err = result.err().unwrap_or_default();
     let program = resolve_program(cfg.terminal.program.trim())?;
     let mut cfg = cfg.clone();
     cfg.terminal.program = program;
     let inner = attach_argv(&cfg, spec)?;
-    let argv = systemd_run_argv(&inner, &cfg);
-    let (bin, args) = argv
-        .split_first()
-        .ok_or_else(|| "empty terminal argv".to_string())?;
-    let status = Command::new(bin)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| format!("{bin}: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{bin} failed ({status})"))
-    }
+    let fallback = systemd_run_argv(&inner, &cfg);
+    run_logged(&fallback).map_err(|e| format!("{niri_err}; systemd-run: {e}"))
 }
 
-/// niri `spawn` runs vps in `app-niri-vps-*.scope`. When the picker exits,
-/// systemd kills that cgroup. Start the TTY as a separate user service so it
-/// survives. `systemd-run --user --no-block --collect` (see systemd-run(1)).
+/// Picker asks niri to spawn `vps attach` as its own window/scope, then exits.
+/// That child execs the terminal so niri's `app-niri-vps-*.scope` is the TTY.
+pub fn niri_attach_argv(exe: &Path, spec: AttachSpec) -> Vec<String> {
+    let mut a = vec![
+        "niri".into(),
+        "msg".into(),
+        "action".into(),
+        "spawn".into(),
+        "--".into(),
+        exe.display().to_string(),
+        "attach".into(),
+    ];
+    match spec {
+        AttachSpec::New => a.push("--new".into()),
+        AttachSpec::Id(id) => {
+            a.push("--id".into());
+            a.push(id.to_string());
+        }
+    }
+    a
+}
+
+/// niri `spawn` runs the picker in `app-niri-vps-*.scope`. Fallback if `niri msg` fails.
 pub fn systemd_run_argv(inner: &[String], cfg: &Config) -> Vec<String> {
     let mut a = vec![
         "systemd-run".into(),
         "--user".into(),
-        "--no-block".into(),
         "--collect".into(),
         "--quiet".into(),
     ];
@@ -157,6 +170,72 @@ pub fn systemd_run_argv(inner: &[String], cfg: &Config) -> Vec<String> {
     a.push("--".into());
     a.extend(inner.iter().cloned());
     a
+}
+
+/// Replace this process with the terminal (must be called before iced starts).
+pub fn exec_attach(cfg: &Config, spec: AttachSpec) -> ! {
+    let program = match resolve_program(cfg.terminal.program.trim()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("vps: {e}");
+            std::process::exit(1);
+        }
+    };
+    let mut cfg = cfg.clone();
+    cfg.terminal.program = program;
+    let argv = match attach_argv(&cfg, spec) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("vps: {e}");
+            std::process::exit(1);
+        }
+    };
+    log_spawn(&argv, "exec");
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    for (k, v) in cfg.term_env() {
+        cmd.env(k, v);
+    }
+    let err = cmd.exec();
+    eprintln!("vps: exec {}: {err}", argv[0]);
+    std::process::exit(1);
+}
+
+fn run_logged(argv: &[String]) -> Result<(), String> {
+    let (bin, args) = argv
+        .split_first()
+        .ok_or_else(|| "empty spawn argv".to_string())?;
+    let out = Command::new(bin)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("{bin}: {e}"))?;
+    if out.status.success() {
+        log_spawn(argv, "ok");
+        Ok(())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let msg = format!("{bin} failed ({:?}): {err}", out.status.code());
+        log_spawn(argv, &msg);
+        Err(msg)
+    }
+}
+
+fn log_spawn(argv: &[String], result: &str) {
+    let dir = state_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let line = format!("{result}\n{argv:?}\n");
+    let _ = std::fs::write(dir.join("last-spawn.log"), line);
+}
+
+fn state_dir() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/state"))
+        .join("vps")
 }
 
 fn ssh_cmd(cfg: &Config, spec: AttachSpec) -> Vec<String> {
@@ -405,11 +484,32 @@ mod tests {
         let wrapped = systemd_run_argv(&argv, &cfg_with("/usr/bin/kitty"));
         assert_eq!(wrapped[0], "systemd-run");
         assert!(wrapped.iter().any(|a| a == "--user"));
-        assert!(wrapped.iter().any(|a| a == "--no-block"));
         assert!(wrapped.iter().any(|a| a == "--collect"));
         let dash = wrapped.iter().position(|a| a == "--").expect("--");
         assert_eq!(wrapped[dash + 1], "/usr/bin/kitty");
         assert!(wrapped.iter().any(|a| a.starts_with("--setenv=TERM=")));
+    }
+
+    #[test]
+    fn niri_asks_to_spawn_vps_attach() {
+        let argv = niri_attach_argv(Path::new("/home/tj/.local/bin/vps"), AttachSpec::Id(1));
+        assert_eq!(
+            argv.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "niri",
+                "msg",
+                "action",
+                "spawn",
+                "--",
+                "/home/tj/.local/bin/vps",
+                "attach",
+                "--id",
+                "1",
+            ]
+        );
+        let new = niri_attach_argv(Path::new("/home/tj/.local/bin/vps"), AttachSpec::New);
+        assert_eq!(new[new.len() - 2], "attach");
+        assert_eq!(new[new.len() - 1], "--new");
     }
 
     #[test]

@@ -76,6 +76,15 @@ struct Cli {
 enum Cmd {
     /// Edit ~/.config/vps/config.toml
     Settings,
+    /// Exec the chosen terminal onto a grok PTY (used by the picker via niri spawn).
+    Attach {
+        /// Reconnect to this session id.
+        #[arg(long)]
+        id: Option<u64>,
+        /// Always create a new PTY.
+        #[arg(long)]
+        new: bool,
+    },
 }
 
 impl App {
@@ -744,6 +753,9 @@ fn list_sessions(cfg: &Config) -> Result<Vec<SessionInfo>, String> {
 
 fn main() -> iced::Result {
     let cli = Cli::parse();
+    if let Some(Cmd::Attach { id, new }) = cli.cmd {
+        attach_cli(id, new);
+    }
     let open_settings = matches!(cli.cmd, Some(Cmd::Settings));
     let cfg = Config::load();
     let window = window::Settings {
@@ -765,6 +777,23 @@ fn main() -> iced::Result {
         app = app.font(*face);
     }
     app.run()
+}
+
+fn attach_cli(id: Option<u64>, new: bool) -> ! {
+    if new && id.is_some() {
+        eprintln!("vps: --new and --id cannot both be set");
+        std::process::exit(1);
+    }
+    let spec = match id {
+        Some(id) => AttachSpec::Id(id),
+        None => AttachSpec::New,
+    };
+    let cfg = Config::load();
+    if terminal::needs_chooser(&cfg) {
+        eprintln!("vps: no terminal chosen — run vps and pick one");
+        std::process::exit(1);
+    }
+    terminal::exec_attach(&cfg, spec);
 }
 
 #[cfg(test)]

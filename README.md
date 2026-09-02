@@ -73,7 +73,7 @@ sequenceDiagram
 ```
 
 1. **`vps`** is an iced **picker** (and settings / first-run terminal chooser). App id `vps`. Palette is Irongall with the ground shifted red. It is not the TTY — iced_term died on Grok’s alt-screen flood.
-2. The session window is **your terminal** (`[terminal].program`). Empty → chooser of known binaries on PATH (kitty, foot, alacritty, ghostty, wezterm). If the saved program is deleted or not executable, the chooser comes back with a reason. Recipes use each emulator’s documented CLI for class/app-id (and colors where the docs name the flag). The TTY is started with `systemd-run --user --no-block` so it is not in niri’s `app-niri-vps-*.scope` (that scope dies with the picker). Switch later with picker `t` or `vps settings`.
+2. The session window is **your terminal** (`[terminal].program`). Empty → chooser of known binaries on PATH (kitty, foot, alacritty, ghostty, wezterm). If the saved program is deleted or not executable, the chooser comes back with a reason. Recipes use each emulator’s documented CLI for class/app-id (and colors where the docs name the flag). The picker does `niri msg action spawn -- vps attach --id N`; that process **execs** the terminal so niri’s scope for the TTY is not the picker’s. Switch later with picker `t` or `vps settings`.
 3. That window’s child is **OpenSSH**: `ssh -tt grok '/home/tj/.local/bin/vpsd attach'`. `-tt` forces a remote tty. ControlMaster on `Host grok` makes the extra hop cheap.
 4. **`vpsd attach`** requires a tty. It connects to the **Unix socket** the daemon bound (never a port).
 5. **`vpsd daemon`** (systemd `--user` on grok) owns the PTY table and a **scrollback ring** of PTY output (`scrollback_bytes`). `open` creates a PTY; `attach --id` reconnects.
